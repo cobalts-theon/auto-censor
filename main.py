@@ -43,11 +43,10 @@ def main():
             for face in faces:
                 x1, y1, x2, y2 = face.box
                 cv2.rectangle(frame, (x1, y1), (x2-1, y2-1), (0, 255, 0), 2)
-                label = (f"Confidence: {face.confidence:.1%}" if face.source == "Detected"
+                label = (f"{face.confidence:.1%}" 
+                         if face.source == "Detected"
                          else f"{face.source} | Last conf: {face.confidence:.1%}")
-                cv2.putText(frame, label,
-                            (x1, max(20, y1-8)), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.6, (0, 255, 0), 2)
+                cv2.putText(frame, label, (x1, max(20, y1-8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             frames += 1
             frame_id += 1
             now = perf_counter()
