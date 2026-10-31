@@ -1,0 +1,43 @@
+# Python environments and bytecode
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+
+# Test, lint and build artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+.aws/
+
+# Generated results and local datasets
+/outputs/*
+!/outputs/.gitkeep
+/runs/*
+!/runs/.gitkeep
+/datasets/*
+!/datasets/.gitkeep
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Editor and operating system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.log
