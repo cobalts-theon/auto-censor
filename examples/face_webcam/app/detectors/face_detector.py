@@ -13,7 +13,7 @@ class Face:
 
 
 class FaceDetector:
-    def __init__(self, model_path, detect_width=640, threshold=0.6):
+    def __init__(self, model_path, detect_width=640, threshold=0.65):
         if not Path(model_path).is_file():
             raise FileNotFoundError(f"Không tìm thấy model: {model_path}")
         self.detect_width = detect_width
@@ -38,7 +38,5 @@ class FaceDetector:
                 x2, y2 = min(w, int((x+fw)*w/dw)), min(h, int((y+fh)*h/dh))
                 if x2 > x1 and y2 > y1:
                     px, py = int((x2-x1)*0.2), int((y2-y1)*0.2)
-                    faces.append(Face((max(0, x1-px), max(0, y1-py),
-                                       min(w, x2+px), min(h, y2+py)),
-                                      float(detection[-1])))
+                    faces.append(Face((max(0, x1-px), max(0, y1-py), min(w, x2+px), min(h, y2+py)), float(detection[-1])))
         return faces, inference_ms

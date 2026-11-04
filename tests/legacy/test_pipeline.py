@@ -2,8 +2,8 @@ import unittest
 from pathlib import Path
 import cv2
 import numpy as np
-from app.processing.anonymizer import Mode, anonymize
-from app.detectors.face_detector import Face, FaceDetector
+from examples.face_webcam.app.processing.anonymizer import Mode, anonymize
+from examples.face_webcam.app.detectors.face_detector import Face, FaceDetector
 
 
 class PipelineTests(unittest.TestCase):
@@ -29,7 +29,7 @@ class PipelineTests(unittest.TestCase):
             anonymize(frame, [Face((0, 0, 1, 1), 0.9)], mode)
 
     def test_real_detector_blank_frame(self):
-        detector = FaceDetector(Path(__file__).resolve().parents[1] / 'models/face_detection_yunet_2026may.onnx')
+        detector = FaceDetector(Path(__file__).resolve().parents[2] / 'models/face_detection_yunet_2026may.onnx')
         faces, milliseconds = detector.detect(np.zeros((720, 1280, 3), dtype=np.uint8))
         self.assertEqual(faces, [])
         self.assertGreaterEqual(milliseconds, 0)

@@ -1,0 +1,18 @@
+# Ví dụ ánh xạ sang API Python; CLI hiện cấu hình qua flags, không đọc TOML.
+mode = "black"
+device = "auto"
+margin = 0.1
+imgsz = 640
+enable = ["face", "plate", "card", "cccd"]
+face_threshold = 0.65
+conf_plate = 0.25
+conf_card = 0.25
+conf_cccd = 0.25
+
+# Các khóa dưới minh họa API; không có loader TOML tự động.
+document_redaction_mode = "fields"
+document_detection_strategy = "heuristic"
+document_margin = [0.25, 0.30]
+document_min_fields = 3
+strict_privacy_mode = false
+# detector/hybrid cần document_detector_config riêng với checkpoint toàn giấy tin cậy.

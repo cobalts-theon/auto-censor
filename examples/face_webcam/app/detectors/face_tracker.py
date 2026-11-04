@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from math import ceil, floor
 import cv2
 import numpy as np
-from app.detectors.face_detector import Face
+from .face_detector import Face
 
 
 @dataclass
@@ -32,21 +32,30 @@ class FaceTracker:
             self.tracks = []
             self.previous = None
         self.tracks = [t for t in self.tracks if now-t.last_seen <= self.hold_seconds]
+        # One forward/backward flow pass for all faces; OpenCV builds the
+        # image pyramids once per pass rather than once per person.
+        active = [t for t in self.tracks if t.points is not None]
         for track in self.tracks:
             track.face = Face(track.face.box, track.face.confidence, "Held")
-            if self.previous is not None and track.points is not None:
-                moved, status, _ = cv2.calcOpticalFlowPyrLK(self.previous, gray, track.points, None)
-                if moved is not None:
-                    valid = status.ravel() == 1
-                    backward, back_status, _ = cv2.calcOpticalFlowPyrLK(gray, self.previous, moved, None)
-                    if backward is not None:
-                        valid &= back_status.ravel() == 1
-                        valid &= np.linalg.norm((backward-track.points).reshape(-1, 2), axis=1) < 1.5
-                        if valid.sum() >= 4:
-                            dx, dy = np.median((moved-track.points).reshape(-1, 2)[valid], axis=0)
+        if self.previous is not None and active:
+            points = np.concatenate([t.points for t in active])
+            moved, status, _ = cv2.calcOpticalFlowPyrLK(self.previous, gray, points, None)
+            if moved is not None:
+                backward, back_status, _ = cv2.calcOpticalFlowPyrLK(gray, self.previous, moved, None)
+                if backward is not None:
+                    valid = (status.ravel() == 1) & (back_status.ravel() == 1)
+                    valid &= np.linalg.norm((backward-points).reshape(-1, 2), axis=1) < 1.5
+                    offset = 0
+                    for track in active:
+                        end = offset + len(track.points)
+                        keep = valid[offset:end]
+                        if keep.sum() >= 4:
+                            delta = (moved[offset:end]-track.points).reshape(-1, 2)[keep]
+                            dx, dy = np.median(delta, axis=0)
                             x1, y1, x2, y2 = track.face.box
                             track.face = Face((int(x1+dx), int(y1+dy), int(x2+dx), int(y2+dy)),
                                               track.face.confidence, "Tracked")
+                        offset = end
 
         # Greedy global IoU matching assigns each detection and track at most once.
         pairs = sorted(((_iou(t.face.box, d.box), ti, di)
@@ -76,10 +85,14 @@ class FaceTracker:
                 track.points = None
                 continue
             track.face = Face(box, track.face.confidence, track.face.source)
-            mask = np.zeros_like(gray)
-            mask[box[1]:box[3], box[0]:box[2]] = 255
-            track.points = cv2.goodFeaturesToTrack(gray, maxCorners=40, qualityLevel=0.01,
-                                                   minDistance=5, mask=mask)
+            # Find corners only inside the face, avoiding a full-frame
+            # corner response and full-frame mask allocation for every person.
+            roi = gray[box[1]:box[3], box[0]:box[2]]
+            points = cv2.goodFeaturesToTrack(roi, maxCorners=24, qualityLevel=0.01,
+                                             minDistance=5)
+            if points is not None:
+                points += np.float32([box[0], box[1]])
+            track.points = points
             result.append(track.face)
         self.previous = gray
         return result

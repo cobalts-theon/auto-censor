@@ -41,3 +41,12 @@ Thumbs.db
 *.swp
 *.swo
 *.log
+
+# PrivacyVision: checkpoints and private input/debug data
+*.pt
+*.onnx
+/inputs/*
+!/inputs/.gitkeep
+*.json
+!package.json
+!package-lock.json

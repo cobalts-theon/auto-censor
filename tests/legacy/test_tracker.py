@@ -1,8 +1,8 @@
 import unittest
 import cv2
 import numpy as np
-from app.detectors.face_detector import Face
-from app.detectors.face_tracker import FaceTracker
+from examples.face_webcam.app.detectors.face_detector import Face
+from examples.face_webcam.app.detectors.face_tracker import FaceTracker
 
 
 class TrackerTests(unittest.TestCase):
@@ -38,3 +38,20 @@ class TrackerTests(unittest.TestCase):
         faces = [Face((10, 10, 50, 50), 0.9), Face((130, 10, 170, 50), 0.8)]
         tracker.update(frame, faces, 0)
         self.assertEqual(len(tracker.update(frame, list(reversed(faces)), 0.1)), 2)
+
+    def test_batched_flow_keeps_independent_motion(self):
+        rng = np.random.default_rng(12)
+        frame = np.zeros((180, 300, 3), dtype=np.uint8)
+        frame[40:100, 30:90] = rng.integers(0, 256, (60, 60, 3), dtype=np.uint8)
+        frame[40:100, 200:260] = rng.integers(0, 256, (60, 60, 3), dtype=np.uint8)
+        tracker = FaceTracker()
+        tracker.update(frame, [Face((25, 35, 95, 105), .9),
+                               Face((195, 35, 265, 105), .8)], 0)
+        moved = np.zeros_like(frame)
+        moved[43:103, 35:95] = frame[40:100, 30:90]
+        moved[38:98, 196:256] = frame[40:100, 200:260]
+        faces = tracker.update(moved, [], .1)
+        self.assertEqual(len(faces), 2)
+        self.assertTrue(all(f.source == 'Tracked' for f in faces))
+        self.assertAlmostEqual(faces[0].box[0], 30, delta=1)
+        self.assertAlmostEqual(faces[1].box[0], 191, delta=1)
