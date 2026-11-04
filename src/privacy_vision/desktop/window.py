@@ -25,7 +25,7 @@ class WebcamWorker(QThread):
 
 
 class WebcamWindow(QMainWindow):
-    def __init__(self, models_dir):
+    def __init__(self, models_dir, default_camera=None):
         super().__init__()
         self.models_dir = Path(models_dir)
         self.worker = None
@@ -56,6 +56,10 @@ class WebcamWindow(QMainWindow):
         self.device = QComboBox(); self.device.addItems(['auto', 'cpu', '0'])
         controls.addWidget(self.device)
         self.camera = QSpinBox(); self.camera.setRange(0, 20)
+        if default_camera is not None:
+            self.camera.setValue(default_camera)
+        elif Path('/dev/video1').exists():
+            self.camera.setValue(1)
         controls.addWidget(QLabel('Camera')); controls.addWidget(self.camera)
         self.rotate = QCheckBox('Thử 4 góc giấy tờ (chậm)'); layout.addWidget(self.rotate)
         self.whole_documents = QCheckBox('Che vùng giấy từ cụm field (ít field: che từng trường)')
@@ -72,6 +76,14 @@ class WebcamWindow(QMainWindow):
         self.checkpoint_button = QPushButton('Chọn checkpoint Document Detector cục bộ')
         self.checkpoint_button.clicked.connect(self.select_document_checkpoint)
         layout.addWidget(self.checkpoint_button)
+        doc_checkpoint = self.models_dir / 'document_best.pt'
+        if doc_checkpoint.is_file():
+            self.document_checkpoint = doc_checkpoint
+            for i in (1, 2): self.strategy.model().item(i).setEnabled(True)
+            self.strategy.setCurrentText('detector')
+            self.checkpoint_button.setText(f'Đã chọn: {doc_checkpoint.name}')
+            if 'card' in self.checks: self.checks['card'].setChecked(False)
+            if 'cccd' in self.checks: self.checks['cccd'].setChecked(False)
         self.strict = QCheckBox('Strict privacy mode (có thể che đen cả cảnh không chứa giấy tờ)')
         layout.addWidget(self.strict)
         layout.addWidget(QLabel('Heuristic không xác nhận mép giấy. Full + strict chưa có document detector sẽ che đen.'))
@@ -215,7 +227,8 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description='PrivacyVision PySide6 webcam')
     parser.add_argument('--models-dir', type=Path, default=Path(__file__).resolve().parents[3]/'models')
+    parser.add_argument('--camera', type=int, default=None, help='Chỉ số camera mặc định')
     args = parser.parse_args()
     app = QApplication([])
-    window = WebcamWindow(args.models_dir); window.show()
+    window = WebcamWindow(args.models_dir, default_camera=args.camera); window.show()
     return app.exec()

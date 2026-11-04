@@ -151,3 +151,21 @@ def test_confirmed_large_replacement_retires_old_nested_hypothesis():
     tracker.update(frame,[large],.06)
     result=tracker.update(frame,[large],.09)
     assert len(result)==1 and result[0].bbox==large.bbox
+
+
+def test_document_continuous_tilt_tracking():
+    frame = np.zeros((300, 300, 3), np.uint8)
+    frame[50:250, 50:200] = np.random.default_rng(42).integers(50, 250, (200, 150, 3), dtype=np.uint8)
+    t = RegionTracker(hold_seconds=0.6, document_hold_seconds=0.6)
+    doc = Detection('document', 0, 'document_region', 0.9, (50, 50, 200, 250))
+    t.update(frame, [doc], 0)
+
+    current_frame = frame
+    # Rotate 2 deg each frame for 5 frames without detector
+    for step in range(1, 6):
+        M = cv2.getRotationMatrix2D((125, 150), 2.0, 1.0)
+        current_frame = cv2.warpAffine(current_frame, M, (300, 300))
+        res = t.update(current_frame, [], step * 0.033)
+        assert len(res) == 1
+        assert res[0].metadata['tracking_state'] == 'tracked'
+

@@ -1,6 +1,7 @@
 from dataclasses import replace
 from time import perf_counter
 import math
+import cv2
 import numpy as np
 from .config import PipelineConfig
 from .schemas import PipelineResult, DocumentRegion
@@ -40,14 +41,20 @@ class PrivacyPipeline:
             tick = perf_counter()
             try:
                 rows = []
-                angles = self.config.document_rotations if detector.source in ('card', 'cccd') else (0,)
+                angles = self.config.document_rotations if detector.source in ('card', 'cccd', 'document') else (0,)
                 for angle in angles:
                     rotated = image if angle == 0 else np.ascontiguousarray(np.rot90(image, angle // 90))
+                    found_angle = False
                     for d in detector.detect(rotated):
                         if len(d.bbox) != 4 or not all(math.isfinite(v) for v in d.bbox) or d.bbox[2] <= d.bbox[0] or d.bbox[3] <= d.bbox[1]:
                             raise ValueError('Invalid detector bbox')
                         rows.append(replace(d, bbox=unrotate_box(d.bbox, w, h, angle),
                             metadata={**d.metadata, 'rotation_degrees': angle}))
+                        if d.confidence >= config.confidence:
+                            found_angle = True
+                    # Adaptive rotation: once document is detected at current angle, stop rotating to maintain 30+ FPS!
+                    if detector.source == 'document' and found_angle:
+                        break
                 for d in rows:
                     if d.source != detector.source or not math.isfinite(d.confidence) or not 0 <= d.confidence <= 1:
                         raise ValueError("Invalid detector output")
@@ -57,6 +64,22 @@ class PrivacyPipeline:
                             raise ValueError('Unsupported document class')
                     box = normalize_box(d.bbox, w, h, 0 if detector.source == 'document' else self.config.margin)
                     if box and d.confidence >= config.confidence:
+                        if detector.source == 'document':
+                            area = (box[2] - box[0]) * (box[3] - box[1])
+                            if area > self.config.max_document_area_ratio * w * h:
+                                # When brought close to screen, card/document covers > 50% of frame.
+                                # Only reject as wall/background false positive if it's an oversized paper_document
+                                # with low confidence or flat texture (plain white wall).
+                                is_flat_wall = False
+                                if d.class_name == 'paper_document' and d.confidence < 0.60:
+                                    x1, y1, x2, y2 = box
+                                    roi = image[y1:y2, x1:x2]
+                                    if roi.size > 0:
+                                        small_roi = cv2.resize(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY), (160, 120))
+                                        if cv2.Laplacian(small_roi, cv2.CV_64F).var() < 120:
+                                            is_flat_wall = True
+                                if is_flat_wall:
+                                    continue
                         detections.append(replace(d, bbox=box))
             except Exception as exc:
                 raise RuntimeError(f"Detector {detector.source} failed; no image exported") from exc
@@ -104,7 +127,7 @@ class PrivacyPipeline:
                 # of old field tracks creates ghost rectangles around documents.
                 field = d.source in ('card','cccd') and d.class_name != 'document_region'
                 (untracked if field else tracked).append(d)
-            detections = tracker.update(image, tracked, perf_counter()) + untracked + region_detections
+            detections = tracker.update(image, tracked, perf_counter()) + untracked
             timings['tracking'] = (perf_counter()-tick)*1000
             tick = perf_counter()
         reasons = ['scene_not_verified']

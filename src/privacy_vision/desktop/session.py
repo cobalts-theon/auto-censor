@@ -81,7 +81,7 @@ def run_session(config, camera, buffer, stopped, pipeline_factory=PrivacyPipelin
         if not config.detectors:
             raise ValueError('At least one detector is required for webcam')
         pipeline = pipeline_factory(config)  # Model initialization stays in worker.
-        tracker = RegionTracker(hold_seconds=.6)
+        tracker = RegionTracker(hold_seconds=.6, document_hold_seconds=.6)
         device = describe_device(pipeline)
         if stopped():
             return

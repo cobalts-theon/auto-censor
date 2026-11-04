@@ -11,6 +11,7 @@ class DetectorConfig:
     checkpoint: Path
     confidence: float = 0.25
     imgsz: int = 640
+    classes: tuple[str, ...] | None = None
 
     def __post_init__(self):
         if self.source not in (*MODEL_FILES, "document") or not 0 <= self.confidence <= 1:
@@ -35,6 +36,7 @@ class PipelineConfig:
     document_min_fields: int = 3
     strict_privacy_mode: bool = False
     document_detector_config: DetectorConfig | None = None
+    max_document_area_ratio: float = 0.45
 
     def __post_init__(self):
         if self.document_redaction_mode is None:

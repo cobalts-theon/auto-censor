@@ -29,13 +29,21 @@ def _association(a,b):
     x,y=a.bbox,b.bbox
     old_area=(x[2]-x[0])*(x[3]-x[1])
     new_area=(y[2]-y[0])*(y[3]-y[1])
-    if new_area>2.5*old_area:
-        return 0.  # A sudden large proposal needs its own confirmation.
+    if a.source != 'document' and b.source != 'document' and new_area>2.5*old_area:
+        return 0.  # A sudden large proposal needs its own confirmation for heuristic only.
     intersection=max(0,min(x[2],y[2])-max(x[0],y[0]))*max(0,min(x[3],y[3])-max(x[1],y[1]))
     smaller=min((x[2]-x[0])*(x[3]-x[1]),(y[2]-y[0])*(y[3]-y[1]))
-    # Missing fields shrink a union dramatically; recognize the nested region
-    # as the same document instead of spawning another lingering mask.
-    return max(score, .8*intersection/smaller) if smaller else score
+    base = max(score, .8*intersection/smaller) if smaller else score
+    if base >= 0.2:
+        return base
+    # Center proximity matching: prevents breaking track when card moves or rotates quickly
+    ca = ((x[0]+x[2])/2, (x[1]+x[3])/2)
+    cb = ((y[0]+y[2])/2, (y[1]+y[3])/2)
+    diag = ((x[2]-x[0])**2 + (x[3]-x[1])**2)**0.5
+    dist = ((ca[0]-cb[0])**2 + (ca[1]-cb[1])**2)**0.5
+    if diag > 0 and dist < 2.5 * diag:
+        return max(0.2, 0.75 * (1.0 - dist / (2.5 * diag)))
+    return base
 
 
 @dataclass
@@ -56,11 +64,12 @@ class _Track:
 
 
 class RegionTracker:
-    def __init__(self,hold_seconds=.6):
-        self.hold_seconds=hold_seconds
-        self.tracks=[]
-        self.previous=None
-        self.input_shape=None
+    def __init__(self, hold_seconds=.6, document_hold_seconds=None):
+        self.hold_seconds = hold_seconds
+        self.document_hold_seconds = document_hold_seconds
+        self.tracks = []
+        self.previous = None
+        self.input_shape = None
 
     def reset(self):
         self.tracks = []
@@ -76,15 +85,17 @@ class RegionTracker:
         if self.previous is not None and (self.previous.shape != gray.shape or self.input_shape != (h,w)):
             self.tracks=[]; self.previous=None
         self.input_shape=(h,w)
+        doc_hold = self.document_hold_seconds if self.document_hold_seconds is not None else min(.25, self.hold_seconds)
         self.tracks=[t for t in self.tracks if now-t.seen <= (
-            min(.25,self.hold_seconds) if t.detection.class_name=='document_region' else self.hold_seconds)]
+            doc_hold if t.detection.class_name=='document_region' else self.hold_seconds)]
         for t in self.tracks: t.state='held'
-        active=[t for t in self.tracks if t.points is not None and t.detection.source in ('face','plate')]
+        active=[t for t in self.tracks if t.points is not None and (
+            t.detection.source in ('face','plate','document') or t.detection.class_name=='document_region')]
         if self.previous is not None and active:
             points=np.concatenate([t.points for t in active])
-            moved,status,_=cv2.calcOpticalFlowPyrLK(self.previous,gray,points,None)
+            moved,status,_=cv2.calcOpticalFlowPyrLK(self.previous,gray,points,None,winSize=(31,31),maxLevel=4)
             if moved is not None and status is not None:
-                back,valid_back,_=cv2.calcOpticalFlowPyrLK(gray,self.previous,moved,None)
+                back,valid_back,_=cv2.calcOpticalFlowPyrLK(gray,self.previous,moved,None,winSize=(31,31),maxLevel=4)
                 if back is not None and valid_back is not None:
                     valid=(status.ravel()==1)&(valid_back.ravel()==1)
                     valid &= np.linalg.norm((back-points).reshape(-1,2),axis=1)<1.5
@@ -92,7 +103,9 @@ class RegionTracker:
                     for t in active:
                         end=offset+len(t.points); keep=valid[offset:end]
                         if keep.sum()>=max(4,len(keep)*.5):
-                            delta=(moved[offset:end]-points[offset:end]).reshape(-1,2)[keep]
+                            src_pts = points[offset:end][keep]
+                            dst_pts = moved[offset:end][keep]
+                            delta=(dst_pts-src_pts).reshape(-1,2)
                             median=np.median(delta,axis=0)
                             coherent=np.median(np.linalg.norm(delta-median,axis=1))<=2.5
                             dx,dy=median/[sx,sy]
@@ -102,6 +115,20 @@ class RegionTracker:
                                 t.detection=replace(t.detection,bbox=box); t.state='tracked'
                                 f=t.filtered_box
                                 t.filtered_box=(f[0]+dx,f[1]+dy,f[2]+dx,f[3]+dy)
+                            elif t.detection.class_name == 'document_region' and keep.sum() >= 6:
+                                # Tilt / rotation handling: points rotate around center, breaking translation coherence.
+                                # Use estimateAffinePartial2D to track rotation and update bounding envelope.
+                                M, inliers = cv2.estimateAffinePartial2D(src_pts, dst_pts)
+                                if M is not None and inliers is not None and inliers.sum() >= 4:
+                                    corners = np.array([[[a*sx, b*sy], [c*sx, b*sy], [c*sx, d*sy], [a*sx, d*sy]]], dtype=np.float32)
+                                    trans_corners = cv2.transform(corners, M)[0] / [sx, sy]
+                                    rx1, ry1 = np.min(trans_corners, axis=0)
+                                    rx2, ry2 = np.max(trans_corners, axis=0)
+                                    rot_box = normalize_box((rx1, ry1, rx2, ry2), w, h)
+                                    if rot_box:
+                                        t.detection = replace(t.detection, bbox=rot_box)
+                                        t.state = 'tracked'
+                                        t.filtered_box = tuple(map(float, rot_box))
                         offset=end
         pairs=sorted(((_association(t.detection,d),ti,di)
             for ti,t in enumerate(self.tracks) for di,d in enumerate(detections)
@@ -113,21 +140,29 @@ class RegionTracker:
             old=t.filtered_box
             geometry_confirmed=True
             if d.class_name=='document_region':
-                # Follow position promptly while damping field-union size jitter.
-                cx=.2*(old[0]+old[2])/2+.8*(d.bbox[0]+d.bbox[2])/2
-                cy=.2*(old[1]+old[3])/2+.8*(d.bbox[1]+d.bbox[3])/2
-                width=.85*(old[2]-old[0])+.15*(d.bbox[2]-d.bbox[0])
-                height=.85*(old[3]-old[1])+.15*(d.bbox[3]-d.bbox[1])
-                # A nested partial union carries little information about card
-                # position or size. Hold the established geometry for this pass.
-                raw_area=(d.bbox[2]-d.bbox[0])*(d.bbox[3]-d.bbox[1])
-                old_area=(old[2]-old[0])*(old[3]-old[1])
-                nested=old[0]<=d.bbox[0] and old[1]<=d.bbox[1] and old[2]>=d.bbox[2] and old[3]>=d.bbox[3]
-                if nested and raw_area < .6*old_area:
-                    smooth=old
-                    geometry_confirmed=False
+                if d.source == 'document' or d.metadata.get('region_source') == 'detector':
+                    # Real detector bounding box: follow promptly so it sticks firmly!
+                    cx = .1 * (old[0] + old[2]) / 2 + .9 * (d.bbox[0] + d.bbox[2]) / 2
+                    cy = .1 * (old[1] + old[3]) / 2 + .9 * (d.bbox[1] + d.bbox[3]) / 2
+                    width = .2 * (old[2] - old[0]) + .8 * (d.bbox[2] - d.bbox[0])
+                    height = .2 * (old[3] - old[1]) + .8 * (d.bbox[3] - d.bbox[1])
+                    smooth = (cx - width / 2, cy - height / 2, cx + width / 2, cy + height / 2)
                 else:
-                    smooth=(cx-width/2,cy-height/2,cx+width/2,cy+height/2)
+                    # Follow position promptly while damping field-union size jitter.
+                    cx=.2*(old[0]+old[2])/2+.8*(d.bbox[0]+d.bbox[2])/2
+                    cy=.2*(old[1]+old[3])/2+.8*(d.bbox[1]+d.bbox[3])/2
+                    width=.85*(old[2]-old[0])+.15*(d.bbox[2]-d.bbox[0])
+                    height=.85*(old[3]-old[1])+.15*(d.bbox[3]-d.bbox[1])
+                    # A nested partial union carries little information about card
+                    # position or size. Hold the established geometry for this pass.
+                    raw_area=(d.bbox[2]-d.bbox[0])*(d.bbox[3]-d.bbox[1])
+                    old_area=(old[2]-old[0])*(old[3]-old[1])
+                    nested=old[0]<=d.bbox[0] and old[1]<=d.bbox[1] and old[2]>=d.bbox[2] and old[3]>=d.bbox[3]
+                    if nested and raw_area < .6*old_area:
+                        smooth=old
+                        geometry_confirmed=False
+                    else:
+                        smooth=(cx-width/2,cy-height/2,cx+width/2,cy+height/2)
             else:
                 smooth=tuple(.25*a+.75*b for a,b in zip(old,d.bbox))
             # Never feed rounded/coverage-expanded render bounds into filtering.
@@ -163,27 +198,37 @@ class RegionTracker:
                 c.detection.bbox[3]>=t.detection.bbox[3] for c in confirmed))]
         result=[]
         for t in self.tracks:
-            if t.detection.class_name=='document_region' and t.hits<2:
+            if t.detection.class_name=='document_region' and t.detection.source != 'document' and t.hits<2:
                 # Fields are still redacted while a whole-document proposal
                 # waits for a second model-supported observation.
                 continue
             render_box = t.detection.bbox
             if t.detection.class_name == 'document_region' and t.state == 'held':
-                # Extrapolate only within a short bounded envelope. Never claim safety.
-                a,b,c,d = render_box
-                age = max(0., now-t.seen)
-                dx = float(np.clip(t.velocity[0]*age, -.2*(c-a), .2*(c-a)))
-                dy = float(np.clip(t.velocity[1]*age, -.2*(d-b), .2*(d-b)))
-                render_box = (min(a,a+dx)-abs(dx), min(b,b+dy)-abs(dy),
-                              max(c,c+dx)+abs(dx), max(d,d+dy)+abs(dy))
+                if t.detection.source != 'document':
+                    # Extrapolate only within a short bounded envelope for heuristic.
+                    a,b,c,d = render_box
+                    age = max(0., now-t.seen)
+                    dx = float(np.clip(t.velocity[0]*age, -.2*(c-a), .2*(c-a)))
+                    dy = float(np.clip(t.velocity[1]*age, -.2*(d-b), .2*(d-b)))
+                    render_box = (min(a,a+dx)-abs(dx), min(b,b+dy)-abs(dy),
+                                  max(c,c+dx)+abs(dx), max(d,d+dy)+abs(dy))
+                else:
+                    # Real detector: velocity-guided hold so rapid motions don't leave the redaction behind
+                    a, b, c, d = t.filtered_box or t.detection.bbox
+                    age = max(0., now - t.seen)
+                    dx = float(np.clip(t.velocity[0] * age, -0.5 * (c - a), 0.5 * (c - a)))
+                    dy = float(np.clip(t.velocity[1] * age, -0.5 * (d - b), 0.5 * (d - b)))
+                    render_box = (a + dx, b + dy, c + dx, d + dy)
             box=normalize_box(render_box,w,h)
             if box is None: t.points=None; continue
             rendered=replace(t.detection,bbox=box)
             x1,y1,x2,y2=normalize_box((box[0]*sx,box[1]*sy,box[2]*sx,box[3]*sy),gray.shape[1],gray.shape[0])
-            points=(cv2.goodFeaturesToTrack(gray[y1:y2,x1:x2],maxCorners=24,qualityLevel=.01,minDistance=5)
-                    if t.detection.source in ('face','plate') else None)
-            if points is not None: points+=np.float32([x1,y1])
-            t.points=points
+            if t.state in ('detected', 'tracked'):
+                if t.state == 'detected' or t.points is None or len(t.points) < 8:
+                    points=(cv2.goodFeaturesToTrack(gray[y1:y2,x1:x2],maxCorners=24,qualityLevel=.01,minDistance=5)
+                            if (t.detection.source in ('face','plate','document') or t.detection.class_name=='document_region') else None)
+                    if points is not None: points+=np.float32([x1,y1])
+                    t.points=points
             result.append(replace(rendered,metadata={**t.detection.metadata,
                 'tracking_state':t.state,'seconds_since_detection':now-t.seen}))
         self.previous=gray

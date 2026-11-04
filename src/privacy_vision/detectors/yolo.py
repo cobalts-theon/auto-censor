@@ -33,6 +33,9 @@ class YoloDetector(BaseDetector):
                 continue
             for row in result.boxes.data.cpu().tolist():
                 x1, y1, x2, y2, confidence, cls = row[:6]
-                output.append(Detection(self.source, int(cls), result.names[int(cls)],
+                cls_name = result.names[int(cls)]
+                if self.config.classes is not None and cls_name not in self.config.classes:
+                    continue
+                output.append(Detection(self.source, int(cls), cls_name,
                     float(confidence), (x1, y1, x2, y2)))
         return output

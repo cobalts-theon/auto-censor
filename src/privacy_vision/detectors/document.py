@@ -2,7 +2,8 @@
 from .yolo import YoloDetector
 
 DOCUMENT_CLASSES = {'identity_card', 'health_insurance_card', 'driver_license',
-                    'birth_certificate', 'document_page'}
+                    'birth_certificate', 'document_page',
+                    'card_document', 'paper_document'}
 
 class DocumentDetector(YoloDetector):
     def __init__(self, config, device):
