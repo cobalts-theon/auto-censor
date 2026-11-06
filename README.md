@@ -75,13 +75,19 @@ Mặc định desktop: camera 720p, mặt/biển số imgsz 640, **giấy tờ i
 
 Dòng thống kê face/plate/card/cccd đếm detection mới trong frame hiện tại, không tính vùng giấy suy ra hoặc track đang giữ. Nó giúp phân biệt model không thấy field với trường hợp đã thấy field nhưng chưa suy ra được cả giấy. Chưa có bằng chứng chất lượng giấy tờ tương đương phát hiện mặt.
 
-## Ảnh và benchmark
+## Ảnh, video và benchmark
 
 ```bash
-.venv/bin/python scripts/predict_image.py --input 'inputs/ảnh.jpg' --output outputs/redacted.png --mode black --device auto --imgsz 640 --metadata-output outputs/metadata.json
-.venv/bin/python scripts/predict_image.py --input 'inputs/ảnh.jpg' --output outputs/document.png --whole-documents --imgsz-card 800 --imgsz-cccd 800
+# Xử lý 1 ảnh
+.venv/bin/python scripts/predict_image.py --input 'inputs/ảnh.jpg' --output outputs/redacted.png --mode pixelate --device auto --metadata-output outputs/metadata.json
+
+# Xử lý cả file video (.mp4, .avi, .mov, .mkv) với tracking mượt mà
+.venv/bin/python scripts/predict_video.py --input 'inputs/clip.mp4' --output outputs/redacted_clip.mp4 --mode pixelate --device auto --metadata-output outputs/video_meta.json
+
+# Benchmark tốc độ inference ảnh
 .venv/bin/python scripts/benchmark.py --input 'inputs/ảnh.jpg' --warmup 1 --runs 5
 .venv/bin/python scripts/predict_image.py --help
+.venv/bin/python scripts/predict_video.py --help
 ```
 
 Hỗ trợ threshold riêng, bật/tắt detector, margin mỗi phía (0.1 = 10%), device auto/cpu/0 và imgsz từng detector. `--document-rotations 0,90,180,270` thử thêm góc Card/CCCD nhưng chậm hơn. Ảnh gốc và metadata/output phải khác đường dẫn. Benchmark tách detector/inference/redaction, không gồm tải model hoặc I/O ảnh.
@@ -122,7 +128,31 @@ Không bảo đảm phát hiện hoặc che hết dữ liệu cá nhân. Blur/pi
 
 Không lưu bản gốc/crop hoặc log nội dung cá nhân. Detector bật mà lỗi thì dừng, không xuất frame gốc dự phòng. Ghi ảnh/metadata atomic riêng; nếu lỗi, output cũ có thể còn đó nên phải kiểm tra exit code. `.gitignore` không gỡ checkpoint đã được theo dõi từ trước; kiểm tra trước khi commit. Không push tự động.
 
-Chưa triển khai xử lý/lưu video, OBS Virtual Camera hay model phát hiện toàn thẻ. Bước nâng chất lượng chuẩn hơn là đánh giá trên ảnh webcam tự cung cấp, rồi bổ sung model document-level ở giai đoạn sau nếu cần.
+## Tích hợp Virtual Camera (Google Meet / Zoom / MS Teams)
+
+PrivacyVision hỗ trợ phát trực tiếp luồng video đã che mờ bảo vệ riêng tư tới **Virtual Webcam (Webcam ảo)** thông qua `pyvirtualcam` (hỗ trợ `v4l2loopback` trên Linux, `OBS Virtual Camera` trên Windows/macOS):
+
+### 1. Chuẩn bị thiết bị webcam ảo (Linux)
+Nếu chưa bật `v4l2loopback`, kích hoạt nhanh bằng lệnh:
+```bash
+sudo modprobe v4l2loopback devices=1 video_nr=0 card_label="PrivacyVision Cam" exclusive_caps=1
+```
+*(Trên hệ thống của bạn đã có sẵn `/dev/video0: OBS Virtual Camera`)*
+
+### 2. Sử dụng trên Desktop GUI
+1. Mở ứng dụng: `.venv/bin/python main.py`
+2. Tích chọn ô **`🎥 Virtual Camera (Meet/Zoom)`** ở thanh điều khiển phía dưới.
+3. Nhấn **`▶ Bắt đầu`**. Trạng thái sẽ hiển thị: `🟢 VCam: /dev/video0 (Live)`.
+4. Mở Google Meet, Zoom hoặc MS Teams $\rightarrow$ Cài đặt Video $\rightarrow$ Chọn Camera: **"PrivacyVision Cam"** hoặc **"OBS Virtual Camera"**.
+5. Mọi hình ảnh bạn gọi trực tuyến sẽ được che mờ khuôn mặt, biển số và giấy tờ tự động theo thời gian thực!
+
+### 3. Sử dụng qua dòng lệnh (CLI)
+```bash
+# Chạy webcam test và tự động phát tới Virtual Camera
+.venv/bin/python scripts/test_camera.py --virtual-cam
+
+# Nhấn phím 'm' trên cửa sổ camera để BẬT/TẮT Virtual Camera tức thì
+```
 
 ## Document protection và strict
 

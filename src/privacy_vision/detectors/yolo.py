@@ -24,9 +24,10 @@ class YoloDetector(BaseDetector):
 
     def detect(self, image):
         # Ultralytics maps boxes.xyxy back to the original ndarray coordinates.
+        kwargs = {"quantize": 16} if self.device != "cpu" else {}
         results = self.model.predict(source=image, conf=self.config.confidence,
-            imgsz=self.config.imgsz, device=self.device, half=self.device != "cpu",
-            batch=1, verbose=False, save=False, save_txt=False, save_crop=False, show=False)
+            imgsz=self.config.imgsz, device=self.device,
+            batch=1, verbose=False, save=False, save_txt=False, save_crop=False, show=False, **kwargs)
         output = []
         for result in results:
             if result.boxes is None:

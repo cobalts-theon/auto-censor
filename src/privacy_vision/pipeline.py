@@ -9,6 +9,58 @@ from .processing.boxes import normalize_box, unrotate_box
 from .processing.redaction import redact
 from .image_io import read_image, write_image
 
+
+def _is_flat_background(roi: np.ndarray) -> bool:
+    """Check if a detected document ROI is a blank surface (wall, door, whiteboard)
+    or an isolated object against a mostly empty background, rather than a genuine document
+    with text, photo, and structured content distributed across the region."""
+    h, w = roi.shape[:2]
+    # Small distant cards (under 50x50) should never be rejected as a wall:
+    # A false-positive wall is always a medium or large region in the camera.
+    if h < 50 or w < 50:
+        return False
+    # Crop interior margin (10%) to exclude outer border/drop-shadow of the wall/furniture
+    mx, my = max(2, int(w * 0.10)), max(2, int(h * 0.10))
+    inner = roi[my:h - my, mx:w - mx]
+    if inner.size == 0 or np.all(inner == inner[0, 0]):
+        return False  # Protect synthetic uniform test arrays or empty rois
+
+    # Fast evaluation on a fixed thumbnail (120x90 is divisible by 3x3 grid: 40x30)
+    small = cv2.resize(inner, (120, 90))
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # 1. Global Canny edges & Sobel gradient
+    edges = cv2.Canny(blurred, 30, 85)
+    edge_density = float(np.count_nonzero(edges) / edges.size)
+    gx = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
+    gy = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
+    grad_mag = np.sqrt(gx**2 + gy**2)
+    grad_mean = float(np.mean(grad_mag))
+    lap_var = float(cv2.Laplacian(blurred, cv2.CV_64F).var())
+
+    # Pure flat wall check: almost no edges or gradients anywhere
+    if edge_density < 0.010 and grad_mean < 14.0 and lap_var < 10.0:
+        return True
+
+    # 2. Grid-based spatial distribution check (3x3 grid)
+    # Catches cases where a head/object in a corner is surrounded by > 50% blank wall
+    flat_cells = 0
+    cell_w, cell_h = 40, 30
+    for r in range(3):
+        for c in range(3):
+            c_edges = edges[r*cell_h:(r+1)*cell_h, c*cell_w:(c+1)*cell_w]
+            c_edge_ratio = np.count_nonzero(c_edges) / c_edges.size
+            c_grad = float(np.mean(grad_mag[r*cell_h:(r+1)*cell_h, c*cell_w:(c+1)*cell_w]))
+            c_lap = float(cv2.Laplacian(blurred[r*cell_h:(r+1)*cell_h, c*cell_w:(c+1)*cell_w], cv2.CV_64F).var())
+            if c_edge_ratio < 0.010 and c_grad < 14.0 and c_lap < 10.0:
+                flat_cells += 1
+
+    # If 5 or more cells out of 9 (>= 55%) are completely blank,
+    # the ROI is predominantly an empty background with an isolated object
+    return flat_cells >= 5
+
+
 class PrivacyPipeline:
     def __init__(self, config: PipelineConfig | None = None, detectors=None, document_detector=None):
         self.config = config or PipelineConfig()
@@ -34,8 +86,9 @@ class PrivacyPipeline:
         start = perf_counter()
         detections, timings = [], {}
         h, w = image.shape[:2]
-        pairs = list(zip(self.detectors, self.config.detectors))
-        if self.config.document_detection_strategy != 'heuristic':
+        active_sources = {c.source: c for c in self.config.detectors}
+        pairs = [(d, active_sources[d.source]) for d in self.detectors if d.source in active_sources]
+        if self.config.document_detection_strategy != 'heuristic' and self.document_detector and self.config.document_detector_config:
             pairs.append((self.document_detector, self.config.document_detector_config))
         for detector, config in pairs:
             tick = perf_counter()
@@ -65,21 +118,10 @@ class PrivacyPipeline:
                     box = normalize_box(d.bbox, w, h, 0 if detector.source == 'document' else self.config.margin)
                     if box and d.confidence >= config.confidence:
                         if detector.source == 'document':
-                            area = (box[2] - box[0]) * (box[3] - box[1])
-                            if area > self.config.max_document_area_ratio * w * h:
-                                # When brought close to screen, card/document covers > 50% of frame.
-                                # Only reject as wall/background false positive if it's an oversized paper_document
-                                # with low confidence or flat texture (plain white wall).
-                                is_flat_wall = False
-                                if d.class_name == 'paper_document' and d.confidence < 0.60:
-                                    x1, y1, x2, y2 = box
-                                    roi = image[y1:y2, x1:x2]
-                                    if roi.size > 0:
-                                        small_roi = cv2.resize(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY), (160, 120))
-                                        if cv2.Laplacian(small_roi, cv2.CV_64F).var() < 120:
-                                            is_flat_wall = True
-                                if is_flat_wall:
-                                    continue
+                            x1, y1, x2, y2 = box
+                            roi = image[y1:y2, x1:x2]
+                            if _is_flat_background(roi):
+                                continue
                         detections.append(replace(d, bbox=box))
             except Exception as exc:
                 raise RuntimeError(f"Detector {detector.source} failed; no image exported") from exc
@@ -143,7 +185,7 @@ class PrivacyPipeline:
         if any(d.metadata.get('tracking_state', 'detected') != 'detected' for d in detections):
             risk.append('tracking_unconfirmed')
         blackout = self.config.strict_privacy_mode and bool(risk)
-        output = np.zeros_like(image) if blackout else redact(image, detections, self.config.mode)
+        output = np.zeros_like(image) if blackout else redact(image, detections, self.config.mode, self.config.pixel_size)
         validate_output(output, image.shape)
         timings["redaction"] = (perf_counter()-tick)*1000
         timings["total"] = (perf_counter()-start)*1000

@@ -30,6 +30,9 @@ class Preview:
     published_at: float = 0.0
     session_id: str = ''
     enabled_detectors: tuple[str, ...] = ()
+    detections: tuple = ()
+    vcam_active: bool = False
+    vcam_device: str = ''
 
 
 class PreviewBuffer:
@@ -72,7 +75,8 @@ def device_label(pipeline):
 
 
 def run_session(config, camera, buffer, stopped, pipeline_factory=PrivacyPipeline,
-                capture_factory=open_capture, describe_device=device_label, session_id=None):
+                capture_factory=open_capture, describe_device=device_label, session_id=None,
+                vcam_broadcaster=None):
     capture = None
     session_id = session_id or uuid4().hex
     stage = 'load'
@@ -111,18 +115,24 @@ def run_session(config, camera, buffer, stopped, pipeline_factory=PrivacyPipelin
             if now - tick >= 1:
                 fps, frames, tick = frames/(now-tick), 0, now
             stage = 'publish'
+            if vcam_broadcaster is not None:
+                vcam_broadcaster.broadcast_frame(result.image, fps=int(captured.fps) if captured.fps > 0 else 30)
+
             capture.publish(Preview(result.image.copy(), fps, result.timings_ms['total'],
                                    dict(result.timings_ms), device, captured.fps,
                                    capture_wait_ms, (now-captured.read_at)*1000, captured.camera_info,
                                    any(d.class_name == 'document_boundary_unresolved'
                                        for d in getattr(result, 'detections', [])),
-                                   {source: sum(d.source == source and not d.metadata.get('derived_region')
+                                   {source: sum((d.source == source or (source == 'document' and d.class_name == 'document_region'))
                                                 and d.metadata.get('tracking_state','detected') == 'detected'
                                                 for d in getattr(result,'detections',[]))
-                                    for source in ('face','plate','card','cccd')},
+                                    for source in ('face','plate','card','cccd','document')},
                                    result.coverage_status, tuple(result.coverage_reasons), result.strict_blackout,
                                    now, session_id, tuple(c.source for c in config.detectors) +
-                                   (('document',) if config.document_detection_strategy != 'heuristic' else ())))
+                                   (('document',) if config.document_detection_strategy != 'heuristic' else ()),
+                                   tuple(getattr(result, 'detections', [])),
+                                   vcam_active=vcam_broadcaster.is_active if vcam_broadcaster else False,
+                                   vcam_device=vcam_broadcaster.device_name if vcam_broadcaster else ''))
     except Exception as exc:
         logging.getLogger(__name__).error('webcam_%s_failure:%s', stage, type(exc).__name__)
         labels = {'load': 'tải model', 'capture': 'camera', 'pipeline': 'AI/redaction',
@@ -130,6 +140,8 @@ def run_session(config, camera, buffer, stopped, pipeline_factory=PrivacyPipelin
         buffer.clear(f'Lỗi {labels[stage]} [{type(exc).__name__}] — đã chặn hiển thị. '
                      'Dừng rồi kiểm tra cấu hình/camera/model và bắt đầu lại.')
     finally:
+        if vcam_broadcaster is not None:
+            vcam_broadcaster.stop()
         if capture is not None:
             capture.stop()
         # Never leave an obsolete frame available after stop or failure.

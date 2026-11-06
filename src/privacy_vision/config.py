@@ -37,6 +37,7 @@ class PipelineConfig:
     strict_privacy_mode: bool = False
     document_detector_config: DetectorConfig | None = None
     max_document_area_ratio: float = 0.45
+    pixel_size: int = 16
 
     def __post_init__(self):
         if self.document_redaction_mode is None:

@@ -141,3 +141,26 @@ def test_cli_old_and_new_flags_share_configuration():
     assert config.document_redaction_mode=='full' and config.strict_privacy_mode
     assert next(c.imgsz for c in config.detectors if c.source=='card')==800
     assert next(c.imgsz for c in config.detectors if c.source=='plate')==640
+
+
+def test_flat_wall_rejected_while_content_document_accepted(tmp_path):
+    import cv2
+    from privacy_vision.pipeline import _is_flat_background
+
+    # 1. White wall with simulated sensor noise
+    np.random.seed(42)
+    wall = np.clip(np.random.normal(215, 5.0, (200, 250, 3)), 0, 255).astype(np.uint8)
+    assert _is_flat_background(wall) is True
+
+    # 2. Document with structured text / lines
+    doc = np.full((200, 250, 3), 245, dtype=np.uint8)
+    cv2.putText(doc, 'CAN CUOC CONG DAN', (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+    cv2.putText(doc, 'So: 0123456789', (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+    cv2.rectangle(doc, (160, 50), (220, 130), (50, 50, 50), -1)  # Avatar box
+    assert _is_flat_background(doc) is False
+
+    # 3. Head in a corner against > 55% white wall
+    head_wall = np.clip(np.random.normal(215, 5.0, (200, 250, 3)), 0, 255).astype(np.uint8)
+    cv2.circle(head_wall, (50, 50), 35, (40, 50, 70), -1)  # Head occupying top-left corner only
+    assert _is_flat_background(head_wall) is True
+

@@ -15,6 +15,7 @@ High-Performance Pipeline:
 - Native 30 FPS.
 """
 import argparse
+from datetime import datetime
 from pathlib import Path
 import sys
 from threading import Thread, Condition
@@ -29,6 +30,7 @@ from privacy_vision.config import PipelineConfig, DetectorConfig
 from privacy_vision.pipeline import PrivacyPipeline
 from privacy_vision.processing.tracking import RegionTracker
 from privacy_vision.desktop.camera import open_camera, CameraOptions
+from privacy_vision.virtualcam import check_virtual_cam_support, VirtualCamBroadcaster
 
 
 class ThreadedCamera:
@@ -117,6 +119,8 @@ def main():
     parser.add_argument("--no-tracking", action="store_true", help="Tắt tracking")
     parser.add_argument("--debug-boxes", action="store_true", help="Hiển thị viền và thông tin model")
     parser.add_argument("--max-area", type=float, default=0.98, help="Tỷ lệ diện tích tối đa (mặc định: 0.98)")
+    parser.add_argument("--virtual-cam", action="store_true", help="Bật phát Virtual Camera (v4l2loopback/pyvirtualcam) cho Google Meet/Zoom")
+    parser.add_argument("--vcam-device", default=None, help="Thiết bị webcam ảo (mặc định: auto-detect hoặc /dev/video0)")
     args = parser.parse_args()
 
     models_dir = PROJECT_ROOT / "models"
@@ -128,6 +132,13 @@ def main():
     use_tracking = not args.no_tracking
     show_boxes = args.debug_boxes
     conf_doc = args.conf_doc
+
+    vcam_support = check_virtual_cam_support()
+    broadcaster = VirtualCamBroadcaster(
+        device=args.vcam_device or vcam_support.get('device'),
+        fps=args.fps,
+        enabled=args.virtual_cam
+    )
 
     print(f"1. Đang mở camera {args.width}x{args.height} (HD 720p @ {args.fps}fps, Auto Exposure)...")
     options = CameraOptions(fps=args.fps, width=args.width, height=args.height, fourcc="MJPG",
@@ -149,7 +160,22 @@ def main():
     # Sticky tracking: 1.0s hold time + Velocity-guided extrapolation + Fast-motion Optical Flow
     tracker = RegionTracker(hold_seconds=0.8, document_hold_seconds=1.0) if use_tracking else None
 
+    snapshots_dir = PROJECT_ROOT / "outputs" / "snapshots"
+    recordings_dir = PROJECT_ROOT / "outputs" / "recordings"
+    is_recording = False
+    video_writer = None
+    record_start_time = 0.0
+    record_frames = 0
+    record_path = None
+    banner_msg = ""
+    banner_until = 0.0
+    banner_color = (0, 255, 0)
+
     print("\n======================= PHÍM TẮT ĐIỀU KHIỂN =======================")
+    print("  's' : CHỤP ẢNH (Snapshot -> outputs/snapshots/)")
+    print("  'v' : BẮT ĐẦU / DỪNG GHI VIDEO (outputs/recordings/)")
+    print("  'm' : BẬT/TẮT Virtual Camera (Google Meet / Zoom)")
+    print(f"        Trạng thái: {vcam_support.get('message', '')}")
     print("  'p' : BẬT/TẮT Biển số xe (Plate)")
     print("  'c' : BẬT/TẮT Card-only (Đang: TẤT CẢ GIẤY TỜ + THẺ)")
     print("  'r' : BẬT/TẮT Thử góc xoay (Adaptive 0° & 90°)")
@@ -178,6 +204,14 @@ def main():
             active_tracker = tracker if use_tracking else None
             result = pipeline.process(frame, tracker=active_tracker)
             latency_ms = (perf_counter() - t0) * 1000
+
+            # Phát Virtual Camera (Meet / Zoom) nếu đang bật
+            broadcaster.broadcast_frame(result.image, fps=int(fps) if fps > 0 else args.fps)
+
+            # Ghi video nền nếu đang kích hoạt chế độ REC
+            if is_recording and video_writer is not None:
+                video_writer.write(result.image)
+                record_frames += 1
 
             frames += 1
             now = perf_counter()
@@ -214,22 +248,86 @@ def main():
             # HUD hiển thị thông số
             rotate_str = "Adaptive 0° & 90°" if rotate else "1 GÓC (0°)"
             doc_mode_label = "CHỈ THẺ" if card_only else "TẤT CẢ GIẤY TỜ + THẺ"
+            vcam_str = f"LIVE ({broadcaster.device_name})" if broadcaster.is_active else ("BAT" if broadcaster.enabled else "OFF")
             hud_1 = f"FPS: {fps:.1f} | Latency: {latency_ms:.0f}ms | Mode: [PIXELATE] | Res: {frame.shape[1]}x{frame.shape[0]}"
             hud_2 = f"Rotate (r): [{rotate_str}] | Mode (c): [{doc_mode_label}] | Plate (p): [{'ON' if enable_plate else 'OFF'}] | Conf: {conf_doc:.2f}"
-            hud_3 = f"Detections: Face: {counts['face']} | Doc: {counts['document']} | Plate: {counts['plate']} | Tracking (t): {'ON' if use_tracking else 'OFF'} | Debug (b): {'ON' if show_boxes else 'OFF'}"
+            hud_3 = f"Detections: Face: {counts['face']} | Doc: {counts['document']} | Plate: {counts['plate']} | VCam (m): [{vcam_str}]"
 
             for text, y in [(hud_1, 30), (hud_2, 60), (hud_3, 90)]:
                 cv2.putText(display_img, text, (12, y + 2), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
                 cv2.putText(display_img, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if y == 30 else ((255, 255, 0) if y == 60 else (0, 255, 255)), 2)
 
+            # Chỉ báo Recording góc trên bên phải
+            if is_recording:
+                elapsed_sec = int(perf_counter() - record_start_time)
+                m, s = divmod(elapsed_sec, 60)
+                rec_label = f"REC {m:02d}:{s:02d} ({record_frames}f)"
+                rx = display_img.shape[1] - 250
+                # Chấm đỏ nhấp nháy mỗi 0.5s
+                if int(perf_counter() * 2) % 2 == 0:
+                    cv2.circle(display_img, (rx - 15, 30), 8, (0, 0, 255), -1)
+                cv2.putText(display_img, rec_label, (rx + 2, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3)
+                cv2.putText(display_img, rec_label, (rx, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+            # Banner thông báo tạm thời ở cạnh dưới
+            if perf_counter() < banner_until and banner_msg:
+                by = display_img.shape[0] - 25
+                cv2.putText(display_img, banner_msg, (22, by + 1), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3)
+                cv2.putText(display_img, banner_msg, (20, by), cv2.FONT_HERSHEY_SIMPLEX, 0.7, banner_color, 2)
+
             cv2.imshow(window_name, display_img)
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord('q'), ord('Q')):
                 break
+            elif key in (ord('s'), ord('S')):
+                snapshots_dir.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                snap_path = snapshots_dir / f"snapshot_{ts}.png"
+                cv2.imwrite(str(snap_path), result.image)
+                banner_msg = f"DA LUU SNAPSHOT: {snap_path.name}"
+                banner_until = perf_counter() + 2.5
+                banner_color = (0, 255, 0)
+                print(f"\n[SNAPSHOT] Đã chụp và lưu ảnh: {snap_path}")
+            elif key in (ord('v'), ord('V')):
+                if not is_recording:
+                    recordings_dir.mkdir(parents=True, exist_ok=True)
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    record_path = recordings_dir / f"record_{ts}.mp4"
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    rec_fps = max(15.0, fps) if fps > 5.0 else float(args.fps)
+                    video_writer = cv2.VideoWriter(str(record_path), fourcc, rec_fps, (frame.shape[1], frame.shape[0]))
+                    is_recording = True
+                    record_start_time = perf_counter()
+                    record_frames = 0
+                    banner_msg = "BAT DAU GHI VIDEO..."
+                    banner_until = perf_counter() + 2.0
+                    banner_color = (0, 0, 255)
+                    print(f"\n[RECORD] Bắt đầu ghi video: {record_path} ({rec_fps:.1f} FPS)")
+                else:
+                    is_recording = False
+                    if video_writer is not None:
+                        video_writer.release()
+                        video_writer = None
+                    dur = perf_counter() - record_start_time
+                    banner_msg = f"DA LUU VIDEO: {record_path.name} ({record_frames}f, {dur:.1f}s)"
+                    banner_until = perf_counter() + 3.0
+                    banner_color = (0, 255, 255)
+                    print(f"\n[RECORD] Đã kết thúc và lưu video: {record_path} ({record_frames} frames, {dur:.1f}s)")
             elif key in (ord('p'), ord('P')):
                 enable_plate = not enable_plate
                 pipeline = build_pipeline(models_dir, enable_face, enable_plate, enable_doc, card_only, rotate,
                                          args.conf_face, args.conf_plate, conf_doc, mode="pixelate", device=args.device, max_area=args.max_area)
+            elif key in (ord('m'), ord('M')):
+                broadcaster.enabled = not broadcaster.enabled
+                if broadcaster.enabled:
+                    banner_msg = f"BAT VIRTUAL CAM: {broadcaster.device_name}"
+                    banner_color = (0, 255, 0)
+                    print(f"\n[VCAM] Đã bật Virtual Camera: {broadcaster.device_name}")
+                else:
+                    banner_msg = "DA TAT VIRTUAL CAM"
+                    banner_color = (0, 0, 255)
+                    print("\n[VCAM] Đã tắt Virtual Camera")
+                banner_until = perf_counter() + 2.5
             elif key in (ord('r'), ord('R')):
                 rotate = not rotate
                 pipeline = build_pipeline(models_dir, enable_face, enable_plate, enable_doc, card_only, rotate,
@@ -253,6 +351,10 @@ def main():
                 pipeline = build_pipeline(models_dir, enable_face, enable_plate, enable_doc, card_only, rotate,
                                          args.conf_face, args.conf_plate, conf_doc, mode="pixelate", device=args.device, max_area=args.max_area)
     finally:
+        broadcaster.stop()
+        if is_recording and video_writer is not None:
+            video_writer.release()
+            print(f"\n[RECORD] Đã lưu video trước khi thoát: {record_path}")
         cap.release()
         cv2.destroyAllWindows()
         print("Đã đóng camera test.")

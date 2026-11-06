@@ -121,3 +121,116 @@ def test_coverage_status_persists_and_idle_preview_expires(qapp,tmp_path):
     w.refresh()
     assert w.preview.pixmap().isNull()
     w.worker=None; w.close()
+
+
+def test_snapshot_and_recording_controls(qapp, tmp_path):
+    import numpy as np
+    from privacy_vision.desktop.session import Preview
+    w = window.WebcamWindow(tmp_path)
+    assert w.pixel_size.value() == 16
+    assert not w.snapshot_button.isEnabled()
+    assert not w.record_button.isEnabled()
+
+    w.worker = Mock(session_id='test')
+    w.worker.isInterruptionRequested.return_value = False
+    fake_frame = np.full((120, 160, 3), 100, dtype=np.uint8)
+    w.buffer.publish(Preview(fake_frame, 30.0, 5.0, {}, 'cpu', published_at=time.perf_counter(), session_id='test'))
+    w.refresh()
+    assert w.last_frame is not None
+
+    w.take_snapshot()
+    assert 'Đã chụp' in w.status.text()
+    snap_dir = tmp_path.parent / 'outputs' / 'snapshots'
+    assert snap_dir.is_dir()
+    assert len(list(snap_dir.glob('snapshot_*.png'))) >= 1
+
+    w.toggle_recording()
+    assert w.is_recording is True
+    assert 'Dừng ghi' in w.record_button.text()
+
+    w.buffer.publish(Preview(fake_frame, 30.0, 5.0, {}, 'cpu', published_at=time.perf_counter(), session_id='test'))
+    w.refresh()
+
+    w.toggle_recording()
+    assert w.is_recording is False
+    assert 'Ghi video' in w.record_button.text()
+    assert 'Đã lưu video' in w.status.text()
+    rec_dir = tmp_path.parent / 'outputs' / 'recordings'
+    assert rec_dir.is_dir()
+    assert len(list(rec_dir.glob('record_*.mp4'))) >= 1
+
+    w.worker = None
+    w.close()
+
+
+def test_desktop_action_tools_and_neutral_styles(qapp, tmp_path, monkeypatch):
+    w = window.WebcamWindow(tmp_path)
+    for btn in (w.start_button, w.stop_button, w.snapshot_button, w.record_button,
+                w.btn_process_image, w.btn_process_video, w.open_output_button):
+        assert 'background-color' not in btn.styleSheet()
+
+    w.open_output_folder()
+    assert (tmp_path.parent / 'outputs').is_dir()
+    assert 'Đã mở thư mục' in w.status.text()
+
+    w.editable(False)
+    assert not w.btn_process_image.isEnabled()
+    assert not w.btn_process_video.isEnabled()
+    w.editable(True)
+    assert w.btn_process_image.isEnabled()
+    assert w.btn_process_video.isEnabled()
+
+    w.close()
+
+
+def test_desktop_live_settings_update(qapp, tmp_path):
+    w = window.WebcamWindow(tmp_path)
+    cfg = w.create_pipeline_config()
+    w.worker = Mock(config=cfg)
+    assert w.worker.config.pixel_size == 16
+    assert w.worker.config.mode == 'pixelate'
+
+    w.pixel_size.setValue(32)
+    assert w.worker.config.pixel_size == 32
+
+    w.mode.setCurrentText('blur')
+    assert w.worker.config.mode == 'blur'
+
+    w.document_confidence.setValue(0.45)
+    doc_cfg = w.worker.config.document_detector_config
+    if doc_cfg is not None:
+        assert doc_cfg.confidence == 0.45
+
+    # Check live document toggle
+    w.check_doc.setChecked(False)
+    assert w.worker.config.document_detector_config is None
+
+    # Test resolution change handler when running
+    w.worker.isInterruptionRequested.return_value = False
+    w.resolution.setCurrentText('640x480')
+    w.on_resolution_changed()
+    assert 'Đang đổi độ phân giải' in w.status.text()
+
+    w.worker = None
+    w.close()
+
+
+def test_desktop_virtual_cam_toggle(qapp, tmp_path):
+    w = window.WebcamWindow(tmp_path)
+    assert hasattr(w, 'virtual_cam_check')
+    assert hasattr(w, 'vcam_badge')
+    assert not w.virtual_cam_check.isChecked()
+
+    # Toggle on
+    w.virtual_cam_check.setChecked(True)
+    if w.vcam_support.get('available', False):
+        assert w.vcam_broadcaster.enabled is True
+        assert 'VCam' in w.vcam_badge.text()
+
+    # Toggle off
+    w.virtual_cam_check.setChecked(False)
+    assert w.vcam_broadcaster.enabled is False
+    assert 'Tắt' in w.vcam_badge.text()
+
+    w.close()
+
