@@ -1,1 +1,1 @@
-"""Local, headless privacy redaction pipeline."""
+"""Đường ống bảo vệ quyền riêng tư thời gian thực (PrivacyVision)."""

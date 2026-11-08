@@ -1,7 +1,13 @@
+"""Cấu hình chung cho bộ kiểm thử Pytest của dự án PrivacyVision."""
 import os
 import pytest
 
-def pytest_sessionfinish(session, exitstatus):
-    # PySide6 C++ destruction on external USB SSD triggers glibc SIGBUS (135) on process exit.
-    # Exiting directly with the test session exitstatus ensures clean exit code.
-    os._exit(session.exitstatus)
+
+def pytest_unconfigure(config):
+    """Xử lý thoát sạch tiến trình sau khi Pytest đã hoàn thành in toàn bộ báo cáo kiểm thử.
+
+    Tránh lỗi SIGBUS (135) do cơ chế giải phóng bộ nhớ C++ của PySide6 khi chạy trên ổ SSD USB ngoài.
+    """
+    tr = config.pluginmanager.get_plugin("terminalreporter")
+    status = tr._session.exitstatus if tr and hasattr(tr, "_session") else 0
+    os._exit(status)

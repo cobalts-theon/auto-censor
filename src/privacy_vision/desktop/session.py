@@ -1,4 +1,4 @@
-"""Webcam session without Qt dependencies; only processed frames leave this module."""
+"""Phiên xử lý Webcam độc lập không phụ thuộc Qt; chỉ đưa frame đã xử lý ra ngoài."""
 from dataclasses import dataclass, field
 from threading import Lock
 from time import perf_counter
@@ -13,6 +13,7 @@ from privacy_vision.processing.tracking import RegionTracker
 
 @dataclass(frozen=True)
 class Preview:
+    """Dữ liệu khung hình và thống kê hiệu năng hiển thị trên giao diện người dùng."""
     image: np.ndarray
     fps: float
     processing_ms: float
@@ -36,34 +37,39 @@ class Preview:
 
 
 class PreviewBuffer:
-    """Single-slot mailbox; no growing Qt event queue containing images."""
+    """Hộp thư đơn vị (single-slot buffer); tránh tình trạng dồn hàng đợi sự kiện của Qt."""
     def __init__(self):
         self._lock = Lock()
         self._preview = None
         self._status = 'Đang chờ'
 
     def publish(self, preview):
+        """Đưa khung hình mới nhất vào vùng đệm."""
         with self._lock:
             self._preview = preview
             self._status = 'Đang xử lý'
 
     def clear(self, status):
+        """Xóa khung hình hiện tại và cập nhật trạng thái."""
         with self._lock:
             self._preview = None
             self._status = status
 
     def take(self):
+        """Lấy khung hình mới nhất ra khỏi bộ đệm."""
         with self._lock:
             preview, self._preview = self._preview, None
             return preview, self._status
 
 
 def open_capture(index):
+    """Mở thiết bị ghi hình (camera)."""
     from .camera import open_camera, CameraOptions
     return open_camera(index, CameraOptions())
 
 
 def device_label(pipeline):
+    """Mô tả thiết bị tính toán đang được pipeline sử dụng (CPU/CUDA)."""
     if pipeline.config.document_detection_strategy == 'heuristic' and all(c.source == 'face' for c in pipeline.config.detectors):
         return 'CPU (YuNet; không chạy YOLO GPU)'
     device = getattr(pipeline, 'device', 'cpu')
@@ -77,15 +83,16 @@ def device_label(pipeline):
 def run_session(config, camera, buffer, stopped, pipeline_factory=PrivacyPipeline,
                 capture_factory=open_capture, describe_device=device_label, session_id=None,
                 vcam_broadcaster=None):
+    """Vòng lặp xử lý chính của camera thời gian thực."""
     capture = None
     session_id = session_id or uuid4().hex
     stage = 'load'
     try:
         buffer.clear('Đang tải model')
         if not config.detectors:
-            raise ValueError('At least one detector is required for webcam')
-        pipeline = pipeline_factory(config)  # Model initialization stays in worker.
-        tracker = RegionTracker(hold_seconds=.6, document_hold_seconds=.6)
+            raise ValueError('Cần ít nhất một detector cho webcam')
+        pipeline = pipeline_factory(config)  # Khởi tạo mô hình nằm trong tiến trình nền
+        tracker = RegionTracker(hold_seconds=0.8, document_hold_seconds=1.2)
         device = describe_device(pipeline)
         if stopped():
             return
@@ -97,53 +104,77 @@ def run_session(config, camera, buffer, stopped, pipeline_factory=PrivacyPipelin
             wait_started = perf_counter()
             stage = 'capture'
             captured = capture.take(stopped)
-            capture_wait_ms = (perf_counter()-wait_started)*1000
+            capture_wait_ms = (perf_counter() - wait_started) * 1000
             if captured is None:
                 break
             stage = 'pipeline'
-            result = pipeline.process(captured.image, tracker=tracker)  # Errors still stop publication.
+            result = pipeline.process(captured.image, tracker=tracker)
             stage = 'validate'
             validate_output(result.image, captured.image.shape)
             if np.shares_memory(result.image, captured.image):
-                raise ValueError('Pipeline returned raw frame storage')
+                raise ValueError('Pipeline trả về bộ nhớ gốc chưa sao chép')
             if 'total' not in result.timings_ms or any(not math.isfinite(v) or v < 0 for v in result.timings_ms.values()):
-                raise ValueError('Invalid pipeline timing')
+                raise ValueError('Thời gian thực thi pipeline không hợp lệ')
             if stopped():
                 break
             frames += 1
             now = perf_counter()
             if now - tick >= 1:
-                fps, frames, tick = frames/(now-tick), 0, now
+                fps, frames, tick = frames / (now - tick), 0, now
             stage = 'publish'
             if vcam_broadcaster is not None:
                 vcam_broadcaster.broadcast_frame(result.image, fps=int(captured.fps) if captured.fps > 0 else 30)
 
-            capture.publish(Preview(result.image.copy(), fps, result.timings_ms['total'],
-                                   dict(result.timings_ms), device, captured.fps,
-                                   capture_wait_ms, (now-captured.read_at)*1000, captured.camera_info,
-                                   any(d.class_name == 'document_boundary_unresolved'
-                                       for d in getattr(result, 'detections', [])),
-                                   {source: sum((d.source == source or (source == 'document' and d.class_name == 'document_region'))
-                                                and d.metadata.get('tracking_state','detected') == 'detected'
-                                                for d in getattr(result,'detections',[]))
-                                    for source in ('face','plate','card','cccd','document')},
-                                   result.coverage_status, tuple(result.coverage_reasons), result.strict_blackout,
-                                   now, session_id, tuple(c.source for c in config.detectors) +
-                                   (('document',) if config.document_detection_strategy != 'heuristic' else ()),
-                                   tuple(getattr(result, 'detections', [])),
-                                   vcam_active=vcam_broadcaster.is_active if vcam_broadcaster else False,
-                                   vcam_device=vcam_broadcaster.device_name if vcam_broadcaster else ''))
+            capture.publish(
+                Preview(
+                    result.image.copy(),
+                    fps,
+                    result.timings_ms['total'],
+                    dict(result.timings_ms),
+                    device,
+                    captured.fps,
+                    capture_wait_ms,
+                    (now - captured.read_at) * 1000,
+                    captured.camera_info,
+                    any(d.class_name == 'document_boundary_unresolved' for d in getattr(result, 'detections', [])),
+                    {
+                        source: sum(
+                            (d.source == source or (source == 'document' and d.class_name == 'document_region'))
+                            and d.metadata.get('tracking_state', 'detected') == 'detected'
+                            for d in getattr(result, 'detections', [])
+                        )
+                        for source in ('face', 'plate', 'card', 'cccd', 'document')
+                    },
+                    result.coverage_status,
+                    tuple(result.coverage_reasons),
+                    result.strict_blackout,
+                    now,
+                    session_id,
+                    tuple(c.source for c in config.detectors)
+                    + (('document',) if config.document_detection_strategy != 'heuristic' else ()),
+                    tuple(getattr(result, 'detections', [])),
+                    vcam_active=vcam_broadcaster.is_active if vcam_broadcaster else False,
+                    vcam_device=vcam_broadcaster.device_name if vcam_broadcaster else '',
+                )
+            )
     except Exception as exc:
         logging.getLogger(__name__).error('webcam_%s_failure:%s', stage, type(exc).__name__)
-        labels = {'load': 'tải model', 'capture': 'camera', 'pipeline': 'AI/redaction',
-                  'validate': 'kiểm tra kết quả', 'publish': 'xuất preview'}
-        buffer.clear(f'Lỗi {labels[stage]} [{type(exc).__name__}] — đã chặn hiển thị. '
-                     'Dừng rồi kiểm tra cấu hình/camera/model và bắt đầu lại.')
+        labels = {
+            'load': 'tải model',
+            'capture': 'camera',
+            'pipeline': 'AI/redaction',
+            'validate': 'kiểm tra kết quả',
+            'publish': 'xuất preview',
+        }
+        buffer.clear(
+            f'Lỗi {labels[stage]} [{type(exc).__name__}] — đã chặn hiển thị. '
+            'Dừng rồi kiểm tra cấu hình/camera/model và bắt đầu lại.'
+        )
     finally:
         if vcam_broadcaster is not None:
             vcam_broadcaster.stop()
         if capture is not None:
             capture.stop()
-        # Never leave an obsolete frame available after stop or failure.
+        # Không bao giờ để lại frame cũ sau khi dừng hoặc lỗi
         _, status = buffer.take()
         buffer.clear(status if status.startswith('Lỗi') else 'Đã dừng')

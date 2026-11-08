@@ -17,11 +17,14 @@ def test_check_virtual_cam_support_schema():
 
 
 def test_virtual_cam_broadcaster_default_state():
-    b = VirtualCamBroadcaster(device="/dev/video99", fps=25, enabled=False)
+    b = VirtualCamBroadcaster(fps=25, enabled=False)
     assert not b.is_active
     assert not b.enabled
     assert b.device_name == "PrivacyVision Cam"
     assert b.actual_backend is None
+
+    b_dev = VirtualCamBroadcaster(device="/dev/video99", fps=25, enabled=False)
+    assert b_dev.device_name == "/dev/video99"
 
 
 def test_virtual_cam_broadcaster_mock_lifecycle():

@@ -1,3 +1,4 @@
+"""Giao diện dòng lệnh xử lý hình ảnh đơn lẻ (Image Redaction CLI)."""
 import argparse
 import json
 from pathlib import Path

@@ -1,20 +1,23 @@
+"""Giao diện đồ họa máy tính (Desktop GUI) PySide6 cho PrivacyVision.
+
+Điều khiển thời gian thực hệ thống che mờ camera/video với khả năng tùy chỉnh linh hoạt:
+- Đối tượng bảo vệ: khuôn mặt, biển số xe, căn cước công dân, tài liệu và thẻ.
+- Hiệu ứng che: pixelate (hạt vuông tùy chỉnh kích thước), blur (làm mờ mượt), blackout (che đen).
+- Tính năng mở rộng: chụp ảnh snapshot, ghi video mp4, phát webcam ảo (Virtual Camera Meet/Zoom),
+  xử lý ảnh và video ngoại tuyến hàng loạt.
+"""
 from datetime import datetime
-from functools import partial
 from pathlib import Path
 from time import perf_counter
-from uuid import uuid4
 import cv2
 import numpy as np
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal, QUrl, QSize, QPointF, QRectF
-from PySide6.QtGui import (
-    QImage, QPixmap, QDesktopServices, QIcon, QPainter, QColor,
-    QPen, QBrush, QPolygonF
-)
+from PySide6.QtCore import Qt, QTimer, QUrl, QSize
+from PySide6.QtGui import QImage, QPixmap, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QCheckBox, QComboBox, QSpinBox, QDoubleSpinBox,
-    QFileDialog, QGroupBox, QFrame, QSlider, QGridLayout, QStyle
+    QFileDialog, QGroupBox, QFrame, QSlider, QGridLayout
 )
 
 from privacy_vision.config import PipelineConfig, DetectorConfig, MODEL_FILES
@@ -22,246 +25,14 @@ from .session import PreviewBuffer, run_session
 from .camera import CameraOptions, open_camera
 from privacy_vision.virtualcam import check_virtual_cam_support, VirtualCamBroadcaster
 
-
-def get_icon(name: str) -> QIcon:
-    """Create or load a button icon using theme icons, standard pixmaps, or vector fallbacks."""
-    theme_fallbacks = {
-        'camera': ['camera-photo', 'camera', 'camera-web'],
-        'folder': ['folder-open', 'folder', 'document-open'],
-        'image': ['image-x-generic', 'image', 'applications-graphics'],
-        'video': ['video-x-generic', 'video', 'applications-multimedia'],
-        'start': ['media-playback-start', 'media-play', 'player_play'],
-        'stop': ['media-playback-stop', 'media-stop', 'player_stop'],
-        'record': ['media-record'],
-    }
-    for theme_name in theme_fallbacks.get(name, [name]):
-        if QIcon.hasThemeIcon(theme_name):
-            icon = QIcon.fromTheme(theme_name)
-            if not icon.isNull():
-                return icon
-
-    app = QApplication.instance()
-    style = app.style() if app else None
-    if style:
-        sp_map = {
-            'camera': QStyle.StandardPixmap.SP_FileDialogDetailedView,
-            'folder': QStyle.StandardPixmap.SP_DirOpenIcon,
-            'image': QStyle.StandardPixmap.SP_FileDialogDetailedView,
-            'video': QStyle.StandardPixmap.SP_MediaPlay,
-            'start': QStyle.StandardPixmap.SP_MediaPlay,
-            'stop': QStyle.StandardPixmap.SP_MediaStop,
-            'record': QStyle.StandardPixmap.SP_DialogYesButton,
-        }
-        if name in sp_map:
-            icon = style.standardIcon(sp_map[name])
-            if not icon.isNull():
-                return icon
-
-    pix = QPixmap(32, 32)
-    pix.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pix)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = QPen(QColor('#e4e4e7'), 2)
-    p.setPen(pen)
-
-    if name == 'camera':
-        p.setBrush(QBrush(QColor('#3f3f46')))
-        p.drawRoundedRect(QRectF(4, 8, 24, 18), 3, 3)
-        p.drawRoundedRect(QRectF(11, 4, 10, 5), 2, 2)
-        p.setBrush(QBrush(QColor('#18181b')))
-        p.drawEllipse(QRectF(10, 11, 12, 12))
-    elif name == 'folder':
-        p.setBrush(QBrush(QColor('#eab308')))
-        p.setPen(QPen(QColor('#ca8a04'), 1.5))
-        p.drawRoundedRect(QRectF(4, 9, 24, 17), 2, 2)
-        p.drawRoundedRect(QRectF(4, 6, 11, 5), 2, 2)
-    elif name == 'image':
-        p.setBrush(QBrush(QColor('#3f3f46')))
-        p.drawRoundedRect(QRectF(4, 5, 24, 22), 3, 3)
-        p.setBrush(QBrush(QColor('#e4e4e7')))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawEllipse(QRectF(8, 9, 5, 5))
-        poly = QPolygonF([QPointF(6, 23), QPointF(14, 15), QPointF(19, 20), QPointF(23, 16), QPointF(26, 23)])
-        p.drawPolygon(poly)
-    elif name == 'video':
-        p.setBrush(QBrush(QColor('#3f3f46')))
-        p.drawRoundedRect(QRectF(4, 6, 17, 20), 3, 3)
-        p.setBrush(QBrush(QColor('#e4e4e7')))
-        poly = QPolygonF([QPointF(21, 11), QPointF(28, 7), QPointF(28, 25), QPointF(21, 21)])
-        p.drawPolygon(poly)
-    elif name == 'start':
-        p.setBrush(QBrush(QColor('#22c55e')))
-        p.setPen(Qt.PenStyle.NoPen)
-        poly = QPolygonF([QPointF(8, 6), QPointF(26, 16), QPointF(8, 26)])
-        p.drawPolygon(poly)
-    elif name == 'stop':
-        p.setBrush(QBrush(QColor('#ef4444')))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(QRectF(7, 7, 18, 18), 3, 3)
-    elif name == 'record':
-        p.setBrush(QBrush(QColor('#ef4444')))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawEllipse(QRectF(6, 6, 20, 20))
-    p.end()
-    return QIcon(pix)
-
-
-DARK_STYLESHEET = """
-QMainWindow {
-    background-color: #121214;
-    color: #f4f4f5;
-}
-QWidget {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    font-size: 13px;
-    color: #e4e4e7;
-}
-QGroupBox {
-    border: 1px solid #27272a;
-    border-radius: 8px;
-    margin-top: 8px;
-    padding-top: 10px;
-    font-weight: 600;
-    color: #f4f4f5;
-    background-color: #18181b;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    subcontrol-position: top left;
-    left: 10px;
-    padding: 0 5px;
-    background-color: #18181b;
-    color: #f4f4f5;
-}
-QLabel {
-    color: #d4d4d8;
-}
-QCheckBox {
-    color: #f4f4f5;
-    spacing: 7px;
-}
-QCheckBox::indicator {
-    width: 17px;
-    height: 17px;
-    border-radius: 4px;
-    border: 1px solid #52525b;
-    background: #27272a;
-}
-QCheckBox::indicator:checked {
-    background: #e4e4e7;
-    border-color: #f4f4f5;
-}
-QComboBox, QSpinBox, QDoubleSpinBox {
-    background-color: #27272a;
-    color: #f4f4f5;
-    border: 1px solid #3f3f46;
-    border-radius: 6px;
-    padding: 4px 8px;
-    min-height: 24px;
-}
-QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
-    border: 1px solid #71717a;
-}
-QComboBox::drop-down {
-    border: none;
-    padding-right: 6px;
-}
-QPushButton {
-    background-color: #27272a;
-    color: #f4f4f5;
-    border: 1px solid #3f3f46;
-    border-radius: 6px;
-    padding: 6px 12px;
-    font-weight: 600;
-    min-height: 26px;
-}
-QPushButton:hover {
-    background-color: #3f3f46;
-    border-color: #52525b;
-}
-QPushButton:pressed {
-    background-color: #18181b;
-}
-QPushButton:disabled {
-    background-color: #18181b;
-    color: #52525b;
-    border-color: #27272a;
-}
-QSlider::groove:horizontal {
-    border: 1px solid #3f3f46;
-    height: 6px;
-    background: #27272a;
-    border-radius: 3px;
-}
-QSlider::sub-page:horizontal {
-    background: #71717a;
-    border-radius: 3px;
-}
-QSlider::handle:horizontal {
-    background: #f4f4f5;
-    border: 1px solid #71717a;
-    width: 14px;
-    margin-top: -5px;
-    margin-bottom: -5px;
-    border-radius: 7px;
-}
-QSlider::handle:horizontal:hover {
-    background: #ffffff;
-}
-"""
-
-
-class WebcamWorker(QThread):
-    def __init__(self, config, camera, buffer, parent=None, camera_options=None, vcam_broadcaster=None):
-        super().__init__(parent)
-        self.session_id = uuid4().hex
-        self.config, self.camera, self.buffer = config, camera, buffer
-        self.camera_options = camera_options or CameraOptions()
-        self.vcam_broadcaster = vcam_broadcaster
-
-    def run(self):
-        run_session(self.config, self.camera, self.buffer, self.isInterruptionRequested,
-                    capture_factory=partial(open_camera, options=self.camera_options), session_id=self.session_id,
-                    vcam_broadcaster=self.vcam_broadcaster)
-
-
-class VideoFileWorker(QThread):
-    progress = Signal(int, int, float, float, object)  # current, total, fps, elapsed, frame
-    finished_signal = Signal(dict)
-    error_signal = Signal(str)
-
-    def __init__(self, input_path, output_path, pipeline, tracker=None, parent=None):
-        super().__init__(parent)
-        self.input_path = Path(input_path)
-        self.output_path = Path(output_path)
-        self.pipeline = pipeline
-        self.tracker = tracker
-        self._interrupted = False
-
-    def requestInterruption(self):
-        self._interrupted = True
-        super().requestInterruption()
-
-    def run(self):
-        try:
-            from privacy_vision.cli.video import process_video
-
-            def cb(current, total, fps, elapsed, frame=None):
-                if self._interrupted or self.isInterruptionRequested():
-                    return False
-                self.progress.emit(current, total, fps, elapsed, frame)
-                return True
-
-            report = process_video(
-                self.input_path, self.output_path, self.pipeline,
-                tracker=self.tracker, progress_callback=cb
-            )
-            self.finished_signal.emit(report)
-        except Exception as e:
-            self.error_signal.emit(str(e))
+# Tái xuất khẩu (re-export) từ các module con để đảm bảo tính tương thích ngược hoàn toàn
+from .theme import get_icon, DARK_STYLESHEET
+from .workers import WebcamWorker, VideoFileWorker
 
 
 class WebcamWindow(QMainWindow):
+    """Cửa sổ chính của ứng dụng PrivacyVision Desktop."""
+
     def __init__(self, models_dir, default_camera=None):
         super().__init__()
         self.models_dir = Path(models_dir)
@@ -275,7 +46,7 @@ class WebcamWindow(QMainWindow):
         self.document_checkpoint = None
         self.buffer = PreviewBuffer()
 
-        # State for snapshot and recording
+        # Trạng thái chụp ảnh snapshot và ghi video
         self.last_frame = None
         self.is_recording = False
         self.video_writer = None
@@ -283,7 +54,7 @@ class WebcamWindow(QMainWindow):
         self.record_start_time = 0.0
         self.record_path = None
 
-        # State for Virtual Camera (pyvirtualcam / Google Meet / Zoom)
+        # Trạng thái Virtual Camera (pyvirtualcam / Google Meet / Zoom)
         self.vcam_support = check_virtual_cam_support()
         self.vcam_broadcaster = VirtualCamBroadcaster(
             device=self.vcam_support.get('device'),
@@ -352,7 +123,7 @@ class WebcamWindow(QMainWindow):
         checks_layout.addWidget(self.check_doc)
         self.checks['document'] = self.check_doc
 
-        # Legacy keys for test compatibility (hidden)
+        # Khóa tương thích ngược cho bộ test cũ (ẩn đi trên giao diện)
         self.check_card = QCheckBox('Thẻ ATM / Card')
         self.check_card.setChecked(True)
         self.check_card.hide()
@@ -370,7 +141,7 @@ class WebcamWindow(QMainWindow):
         self.document_confidence = QDoubleSpinBox()
         self.document_confidence.setRange(.05, .95)
         self.document_confidence.setSingleStep(.05)
-        self.document_confidence.setValue(.25)
+        self.document_confidence.setValue(.20)
         row_conf.addWidget(self.document_confidence)
         det_layout.addLayout(row_conf)
 
@@ -423,12 +194,11 @@ class WebcamWindow(QMainWindow):
 
         right_layout.addWidget(grp_effect)
 
-        # --- Nhóm 3: MỤC RIÊNG CHO CHẾ ĐỘ KHUNG & NHÃN NHẬN DIỆN (THEO YÊU CẦU NGƯỜI DÙNG) ---
+        # --- Nhóm 3: Chế độ Khung & Nhãn Nhận diện ---
         grp_frame = QGroupBox('📦 Chế độ Khung & Nhãn Nhận diện')
         frame_layout = QVBoxLayout(grp_frame)
         frame_layout.setSpacing(5)
 
-        # Bật/tắt hiển thị khung viền và nhãn AI trên màn hình
         self.show_boxes_check = QCheckBox('Hiển thị khung & nhãn nhận diện (AI Boxes)')
         self.show_boxes_check.setChecked(False)
         frame_layout.addWidget(self.show_boxes_check)
@@ -450,7 +220,7 @@ class WebcamWindow(QMainWindow):
 
         right_layout.addWidget(grp_frame)
 
-        # --- Nhóm 4: BẢNG THỐNG KÊ ĐỐI TƯỢNG ĐANG PHÁT HIỆN (BẢNG TRỰC QUAN) ---
+        # --- Nhóm 4: Bảng Thống kê Đối tượng Đang phát hiện ---
         grp_stats = QGroupBox('📊 Bảng Thống kê Đối tượng Đang phát hiện')
         stats_layout = QVBoxLayout(grp_stats)
         stats_layout.setSpacing(4)
@@ -523,7 +293,7 @@ class WebcamWindow(QMainWindow):
         self.strict.setChecked(False)
         self.strict.hide()
 
-        # Kiểm tra file checkpoint
+        # Kiểm tra file checkpoint mô hình tài liệu
         doc_checkpoint = self.models_dir / 'document_best.pt'
         if doc_checkpoint.is_file():
             self.document_checkpoint = doc_checkpoint
@@ -540,14 +310,14 @@ class WebcamWindow(QMainWindow):
         main_layout.addLayout(top_split, 1)
 
         # =========================================================================
-        # 2. KHU VỰC DƯỚI: ĐIỀU KHIỂN CHỨC NĂNG, PHẦN CỨNG & ĐỘ PHÂN GIẢI (BOTTOM DECK)
+        # 2. KHU VỰC DƯỚI: ĐIỀU KHIỂN CHỨC NĂNG, PHẦN CỨNG & ĐỘ PHÂN GIẢI
         # =========================================================================
         bottom_deck = QGroupBox('⚙️ Điều khiển Chức năng & Camera')
         bottom_layout = QVBoxLayout(bottom_deck)
         bottom_layout.setContentsMargins(10, 10, 10, 10)
         bottom_layout.setSpacing(8)
 
-        # Hàng 1: Nút bấm chức năng (Có icon, không có dấu ...)
+        # Hàng 1: Nút bấm chức năng
         btn_bar = QHBoxLayout()
         btn_bar.setSpacing(8)
 
@@ -596,7 +366,7 @@ class WebcamWindow(QMainWindow):
 
         bottom_layout.addLayout(btn_bar)
 
-        # Hàng 2: Thiết lập Camera, Cổng và Độ phân giải (Đổi trực tiếp được)
+        # Hàng 2: Thiết lập Camera, Cổng và Độ phân giải
         cam_bar = QHBoxLayout()
         cam_bar.setSpacing(10)
 
@@ -641,7 +411,6 @@ class WebcamWindow(QMainWindow):
         self.vcam_badge.setStyleSheet('color: #a1a1aa; font-size: 11px;')
         cam_bar.addWidget(self.vcam_badge)
 
-        # Ẩn phơi sáng thủ công để tránh rườm rà
         self.manual_exposure = QCheckBox('Manual Exposure')
         self.manual_exposure.setChecked(False)
         self.manual_exposure.hide()
@@ -654,7 +423,7 @@ class WebcamWindow(QMainWindow):
         cam_bar.addStretch()
         bottom_layout.addLayout(cam_bar)
 
-        # Hàng 3: Trạng thái & Thống kê (Màu mặc định, hoàn toàn không có dấu _)
+        # Hàng 3: Trạng thái & Thống kê
         status_bar = QHBoxLayout()
         status_bar.setSpacing(10)
 
@@ -670,7 +439,7 @@ class WebcamWindow(QMainWindow):
         main_layout.addWidget(bottom_deck)
 
         # =========================================================================
-        # 3. KẾT NỐI SỰ KIỆN (SIGNALS & SLOTS) VÀ ĐIỀU CHỈNH THÔNG SỐ LIVE
+        # 3. KẾT NỐI SỰ KIỆN (SIGNALS & SLOTS)
         # =========================================================================
         self.start_button.clicked.connect(self.start_session)
         self.stop_button.clicked.connect(self.stop_session)
@@ -680,16 +449,11 @@ class WebcamWindow(QMainWindow):
         self.btn_process_video.clicked.connect(self.process_video_file)
         self.open_output_button.clicked.connect(self.open_output_folder)
 
-        # Chuyển đổi độ phân giải trực tiếp
         self.resolution.currentIndexChanged.connect(self.on_resolution_changed)
-
-        # Đồng bộ chế độ khung hình
         self.doc_frame_combo.currentIndexChanged.connect(self.on_frame_mode_changed)
-
-        # Ẩn hiện độ to hạt che theo kiểu che (chỉ hiện khi kiểu che là pixelate)
         self.mode.currentTextChanged.connect(self.on_mode_changed)
 
-        # CẬP NHẬT THÔNG SỐ TRỰC TIẾP (LIVE)
+        # Cập nhật thông số trực tiếp (live settings)
         self.pixel_size.valueChanged.connect(self.apply_live_settings)
         self.document_confidence.valueChanged.connect(self.apply_live_settings)
         self.check_face.stateChanged.connect(self.apply_live_settings)
@@ -702,6 +466,7 @@ class WebcamWindow(QMainWindow):
         self.timer.start(16)
 
     def on_virtual_cam_toggled(self, checked: bool):
+        """Xử lý bật hoặc tắt thiết bị webcam ảo."""
         if checked and not self.vcam_support.get('available', False):
             self.status.setText('Chưa có webcam ảo (v4l2loopback). Chạy lệnh: sudo modprobe v4l2loopback')
             self.virtual_cam_check.setChecked(False)
@@ -719,18 +484,19 @@ class WebcamWindow(QMainWindow):
             self.status.setText('🎥 Đã tắt Virtual Camera.')
 
     def on_frame_mode_changed(self, idx):
-        # idx 0: Full document, idx 1: Fields only
+        """Thay đổi phạm vi che phôi thẻ: idx 0 = Toàn bộ khung thẻ, idx 1 = Chỉ vùng chữ."""
         self.document_mode.setCurrentIndex(1 if idx == 0 else 0)
         self.apply_live_settings()
 
     def on_mode_changed(self, mode_text):
+        """Chuyển đổi kiểu che mờ; chỉ hiện thanh chỉnh hạt khi chọn pixelate."""
         is_pixel = (mode_text == 'pixelate')
         self.row_pixel_widget.setVisible(is_pixel)
         self.lbl_pixel_help.setVisible(is_pixel)
         self.apply_live_settings()
 
     def on_resolution_changed(self):
-        """Khi người dùng đổi độ phân giải bên dưới, nếu camera đang chạy thì tự khởi động lại với kích thước mới."""
+        """Khởi động lại luồng camera với độ phân giải mới khi người dùng lựa chọn."""
         if self.worker is not None and not self.worker.isInterruptionRequested():
             self.status.setText(f'Đang đổi độ phân giải sang {self.resolution.currentText()}...')
             self.stop_session()
@@ -776,13 +542,12 @@ class WebcamWindow(QMainWindow):
             cfg.document_detection_strategy = self.strategy.currentText()
 
     def editable(self, enabled):
-        """Khóa các điều khiển phần cứng cần khởi động lại. Các thông số che mờ luôn mở để chỉnh live!"""
+        """Khóa các điều khiển phần cứng cần khởi động lại. Các thông số che mờ luôn mở để chỉnh live."""
         for widget in [self.device, self.camera, self.camera_fps, self.manual_exposure,
                        self.exposure, self.start_button, self.checkpoint_button,
                        self.btn_process_image, self.btn_process_video]:
             widget.setEnabled(enabled)
 
-        # Cho phép chỉnh độ phân giải, kiểu che, độ to hạt pixel, độ nhạy conf, bật/tắt đối tượng trực tiếp
         for widget in [*self.checks.values(), self.mode, self.pixel_size, self.pixel_size_slider,
                        self.document_confidence, self.resolution, self.doc_frame_combo, self.show_boxes_check,
                        self.virtual_cam_check]:
@@ -793,6 +558,7 @@ class WebcamWindow(QMainWindow):
         self.record_button.setEnabled(not enabled)
 
     def select_document_checkpoint(self):
+        """Mở hộp thoại chọn mô hình phát hiện tài liệu (.pt)."""
         path, _ = QFileDialog.getOpenFileName(self, 'Chọn mô hình giấy tờ', str(self.models_dir), 'YOLO (*.pt)')
         if path:
             self.document_checkpoint = Path(path)
@@ -803,12 +569,14 @@ class WebcamWindow(QMainWindow):
             self.apply_live_settings()
 
     def open_output_folder(self):
+        """Mở thư mục outputs trong trình duyệt tệp hệ thống."""
         outputs_dir = self.models_dir.parent / 'outputs'
         outputs_dir.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(outputs_dir.resolve())))
         self.status.setText(f'📁 Đã mở thư mục kết quả ({outputs_dir.name}/)')
 
     def take_snapshot(self):
+        """Chụp ảnh khung hình hiện tại và lưu vào thư mục outputs/snapshots/."""
         if self.last_frame is None:
             self.status.setText('Chưa có khung hình để chụp ảnh.')
             return
@@ -821,6 +589,7 @@ class WebcamWindow(QMainWindow):
         print(f'[SNAPSHOT] Đã lưu ảnh: {snap_path}')
 
     def toggle_recording(self):
+        """Bắt đầu hoặc kết thúc việc ghi video mp4 trực tiếp từ webcam."""
         if not self.is_recording:
             if self.last_frame is None:
                 self.status.setText('Chưa có khung hình để ghi video.')
@@ -852,6 +621,7 @@ class WebcamWindow(QMainWindow):
             print(f'[RECORD] Đã kết thúc và lưu video: {self.record_path} ({self.record_frames}f, {dur:.1f}s)')
 
     def create_pipeline_config(self):
+        """Khởi tạo đối tượng cấu hình PipelineConfig từ trạng thái các điều khiển trên giao diện."""
         has_doc = (
             self.checks.get('document', QCheckBox()).isChecked()
             and self.document_checkpoint is not None
@@ -894,6 +664,7 @@ class WebcamWindow(QMainWindow):
         )
 
     def start_session(self):
+        """Khởi chạy phiên bắt luồng webcam thời gian thực trên tiến trình nền."""
         if self.worker is not None or self.video_file_worker is not None:
             return
         selected = [s for s, c in self.checks.items() if c.isChecked()]
@@ -928,6 +699,7 @@ class WebcamWindow(QMainWindow):
         self.worker.start()
 
     def stop_session(self):
+        """Dừng phiên làm việc hiện tại của camera hoặc xử lý video file."""
         if self.video_file_worker is not None and self.video_file_worker.isRunning():
             self.video_file_worker.requestInterruption()
             self.status.setText('Đang dừng xử lý file video...')
@@ -945,6 +717,7 @@ class WebcamWindow(QMainWindow):
         self.record_button.setEnabled(False)
 
     def session_finished(self):
+        """Xử lý dọn dẹp tài nguyên sau khi worker kết thúc an toàn."""
         self.refresh()
         self.preview.clear()
         self.worker.deleteLater()
@@ -954,6 +727,7 @@ class WebcamWindow(QMainWindow):
             self.close()
 
     def process_image_file(self):
+        """Mở hộp thoại chọn file ảnh tĩnh để chạy pipeline che mờ và lưu kết quả."""
         if self.worker is not None or self.video_file_worker is not None:
             self.status.setText('Vui lòng dừng camera trước khi xử lý file ảnh.')
             return
@@ -1015,6 +789,7 @@ class WebcamWindow(QMainWindow):
             self.status.setText(f'Lỗi khi xử lý ảnh: {e}')
 
     def process_video_file(self):
+        """Mở hộp thoại chọn video cần che mờ ngoại tuyến theo lô."""
         if self.worker is not None or self.video_file_worker is not None:
             self.status.setText('Vui lòng dừng camera/tiến trình hiện tại trước.')
             return
@@ -1088,6 +863,7 @@ class WebcamWindow(QMainWindow):
         self.status.setText(f'Lỗi khi che video: {err_msg}')
 
     def refresh(self):
+        """Hàm chu kỳ (16ms) lấy khung hình mới nhất từ PreviewBuffer để vẽ lên giao diện."""
         item, status = self.buffer.take()
         if status != 'Đang xử lý':
             self.status.setText(status)
@@ -1141,7 +917,7 @@ class WebcamWindow(QMainWindow):
                 pixmap.scaled(self.preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
             )
 
-            # Cập nhật bảng thống kê số lượng đối tượng (Hoàn toàn không có chữ có dấu _)
+            # Cập nhật bảng thống kê số lượng đối tượng
             faces = item.detection_counts.get('face', 0)
             plates = item.detection_counts.get('plate', 0)
             docs = item.detection_counts.get('document', 0) + item.detection_counts.get('card', 0) + item.detection_counts.get('cccd', 0)
@@ -1178,6 +954,7 @@ class WebcamWindow(QMainWindow):
             self.status.setText('Đang chờ kết quả mới — preview đã hết hạn')
 
     def closeEvent(self, event):
+        """Xử lý sự kiện đóng cửa sổ an toàn, giải phóng camera và các luồng phụ trợ."""
         if self.timer.isActive():
             self.timer.stop()
         if self.is_recording:
@@ -1196,6 +973,7 @@ class WebcamWindow(QMainWindow):
 
 
 def main():
+    """Điểm khởi chạy ứng dụng PrivacyVision Desktop."""
     import argparse
     parser = argparse.ArgumentParser(description='PrivacyVision PySide6 webcam')
     parser.add_argument('--models-dir', type=Path, default=Path(__file__).resolve().parents[3] / 'models')

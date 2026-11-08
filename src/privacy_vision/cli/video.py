@@ -1,4 +1,4 @@
-"""Video redaction CLI and processing pipeline."""
+"""Giao diện dòng lệnh xử lý video tệp tin (Video Redaction CLI)."""
 import argparse
 import json
 from pathlib import Path

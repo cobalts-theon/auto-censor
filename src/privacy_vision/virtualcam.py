@@ -1,8 +1,8 @@
-"""Virtual Camera broadcaster for PrivacyVision.
+"""Bộ phát luồng Camera ảo (Virtual Camera Broadcaster) cho PrivacyVision.
 
-Streams redacted frames to a virtual webcam device (e.g., v4l2loopback on Linux,
-OBS Virtual Camera on Windows/macOS) so third-party applications like Google Meet,
-Zoom, Microsoft Teams, and Discord can consume the privacy-protected stream directly.
+Truyền các khung hình đã được che chắn quyền riêng tư đến thiết bị webcam ảo (v4l2loopback trên Linux,
+OBS Virtual Camera trên Windows/macOS) để các ứng dụng hội nghị như Google Meet, Zoom, Microsoft Teams,
+hoặc Discord có thể sử dụng trực tiếp luồng video đã được bảo vệ.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def check_virtual_cam_support() -> Dict[str, Any]:
-    """Check whether pyvirtualcam is installed and what virtual devices are available."""
+    """Kiểm tra thư viện pyvirtualcam đã được cài đặt chưa và danh sách thiết bị webcam ảo khả dụng."""
     try:
         import pyvirtualcam  # noqa: F401
     except ImportError:
@@ -30,7 +30,7 @@ def check_virtual_cam_support() -> Dict[str, Any]:
             "message": "pyvirtualcam chưa được cài đặt. Cài đặt bằng: pip install pyvirtualcam",
         }
 
-    # Detect Linux v4l2loopback devices in sysfs
+    # Phát hiện thiết bị v4l2loopback trong thư mục ảo của kernel Linux (/sys)
     devices: List[Tuple[str, str]] = []
     v4l_dir = Path("/sys/devices/virtual/video4linux")
     if v4l_dir.exists():
@@ -51,7 +51,7 @@ def check_virtual_cam_support() -> Dict[str, Any]:
             "message": f"Sẵn sàng: {primary_label} ({primary_dev})",
         }
 
-    # Fallback to auto-detection (useful for OBS Virtual Cam on Windows/macOS)
+    # Chế độ tự động phát hiện thiết bị (hỗ trợ OBS Virtual Camera trên Windows/macOS)
     return {
         "available": True,
         "installed": True,
@@ -64,7 +64,7 @@ def check_virtual_cam_support() -> Dict[str, Any]:
 
 
 class VirtualCamBroadcaster:
-    """Manages streaming processed BGR frames to a virtual webcam device."""
+    """Quản lý luồng phát khung hình BGR đã làm mờ ra thiết bị camera ảo."""
 
     def __init__(
         self,
@@ -85,18 +85,21 @@ class VirtualCamBroadcaster:
 
     @property
     def is_active(self) -> bool:
+        """Kiểm tra camera ảo có đang hoạt động hay không."""
         return self._is_active and self._cam is not None
 
     @property
     def device_name(self) -> str:
-        return self._actual_device or self.device or "Virtual Camera"
+        """Tên thiết bị webcam ảo hiển thị với người dùng hoặc hệ thống."""
+        return self._actual_device or self.device or "PrivacyVision Cam"
 
     @property
     def actual_backend(self) -> Optional[str]:
+        """Tên backend thực tế của camera ảo (v4l2loopback, obs, unityvideo,...)."""
         return self._actual_backend
 
     def start(self, width: int, height: int, fps: Optional[int] = None) -> bool:
-        """Start the virtual camera stream at the specified resolution and frame rate."""
+        """Khởi động luồng phát camera ảo theo kích thước và tốc độ khung hình chỉ định."""
         if self._is_active and self._cam is not None:
             if self._width == width and self._height == height:
                 return True
@@ -123,7 +126,7 @@ class VirtualCamBroadcaster:
             self._is_active = True
             self.last_error = None
             logger.info(
-                "Virtual camera started: %s (%dx%d @ %dfps, backend: %s)",
+                "Đã khởi động Camera ảo: %s (%dx%d @ %dfps, backend: %s)",
                 self._actual_device,
                 width,
                 height,
@@ -133,13 +136,13 @@ class VirtualCamBroadcaster:
             return True
         except Exception as exc:
             self.last_error = str(exc)
-            logger.warning("Failed to start virtual camera: %s", exc)
+            logger.warning("Không thể khởi động Camera ảo: %s", exc)
             self._cam = None
             self._is_active = False
             return False
 
     def send(self, frame_bgr: np.ndarray) -> bool:
-        """Send a BGR frame to the virtual camera. Automatically resizes if size mismatches."""
+        """Gửi khung hình BGR tới camera ảo; tự động căn chỉnh kích thước nếu khác biệt."""
         if not self._is_active or self._cam is None:
             return False
 
@@ -157,11 +160,11 @@ class VirtualCamBroadcaster:
             return True
         except Exception as exc:
             self.last_error = str(exc)
-            logger.warning("Error sending frame to virtual camera: %s", exc)
+            logger.warning("Lỗi gửi khung hình tới camera ảo: %s", exc)
             return False
 
     def broadcast_frame(self, frame_bgr: np.ndarray, fps: Optional[int] = None) -> bool:
-        """Helper to broadcast if enabled, starting or stopping as needed."""
+        """Hàm trợ giúp tiện ích phát khung hình nếu chế độ ảo đang được bật."""
         if not self.enabled:
             if self._is_active:
                 self.stop()
@@ -176,12 +179,12 @@ class VirtualCamBroadcaster:
         return self.send(frame_bgr)
 
     def stop(self) -> None:
-        """Stop and release the virtual camera."""
+        """Dừng và giải phóng thiết bị camera ảo."""
         if self._cam is not None:
             try:
                 self._cam.close()
             except Exception as exc:
-                logger.warning("Error closing virtual camera: %s", exc)
+                logger.warning("Lỗi khi đóng camera ảo: %s", exc)
             finally:
                 self._cam = None
         self._is_active = False
