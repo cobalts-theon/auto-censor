@@ -92,7 +92,7 @@ def run_session(config, camera, buffer, stopped, pipeline_factory=PrivacyPipelin
         if not config.detectors:
             raise ValueError('Cần ít nhất một detector cho webcam')
         pipeline = pipeline_factory(config)  # Khởi tạo mô hình nằm trong tiến trình nền
-        tracker = RegionTracker(hold_seconds=0.8, document_hold_seconds=1.2)
+        tracker = RegionTracker(hold_seconds=0.6, document_hold_seconds=0.6)
         device = describe_device(pipeline)
         if stopped():
             return

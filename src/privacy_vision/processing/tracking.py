@@ -28,7 +28,7 @@ def _iou(a, b):
 def _association(a, b):
     """Tính điểm tương đồng giữa vệt cũ và phát hiện mới để ghép nối liên tục."""
     score = _iou(a.bbox, b.bbox)
-    if a.class_name != 'document_region' and a.source not in ('document', 'card', 'cccd'):
+    if a.class_name != 'document_region':
         return score
     x, y = a.bbox, b.bbox
     old_area = (x[2] - x[0]) * (x[3] - x[1])
@@ -45,8 +45,8 @@ def _association(a, b):
     cb = ((y[0] + y[2]) / 2, (y[1] + y[3]) / 2)
     diag = ((x[2] - x[0]) ** 2 + (x[3] - x[1]) ** 2) ** 0.5
     dist = ((ca[0] - cb[0]) ** 2 + (ca[1] - cb[1]) ** 2) ** 0.5
-    if diag > 0 and dist < 4.5 * diag:
-        return max(0.2, 0.75 * (1.0 - dist / (4.5 * diag)))
+    if diag > 0 and dist < 2.5 * diag:
+        return max(0.2, 0.75 * (1.0 - dist / (2.5 * diag)))
     return base
 
 
@@ -96,12 +96,11 @@ class RegionTracker:
         self.input_shape = (h, w)
 
         # Lọc bỏ các vệt đã quá thời gian lưu giữ (hold timeout)
+        doc_hold = self.document_hold_seconds if self.document_hold_seconds is not None else min(0.25, self.hold_seconds)
         self.tracks = [
             t for t in self.tracks
             if now - t.seen <= (
-                (self.document_hold_seconds if self.document_hold_seconds is not None
-                 else (self.hold_seconds if t.detection.source == 'document' else min(0.25, self.hold_seconds)))
-                if t.detection.class_name == 'document_region' else self.hold_seconds
+                doc_hold if t.detection.class_name == 'document_region' else self.hold_seconds
             )
         ]
         for t in self.tracks:
@@ -134,18 +133,16 @@ class RegionTracker:
                             dx, dy = median / [sx, sy]
                             a, b, c, d = t.detection.bbox
                             box = normalize_box((a + dx, b + dy, c + dx, d + dy), w, h)
-                            max_dx = max(60.0, 0.6 * (c - a))
-                            max_dy = max(60.0, 0.6 * (d - b))
-                            if box and coherent and abs(dx) <= max_dx and abs(dy) <= max_dy:
+                            if box and coherent and abs(dx) <= 0.3 * (c - a) and abs(dy) <= 0.3 * (d - b):
                                 t.detection = replace(t.detection, bbox=box)
                                 t.state = 'tracked'
                                 f = t.filtered_box
                                 t.filtered_box = (f[0] + dx, f[1] + dy, f[2] + dx, f[3] + dy)
-                            elif t.detection.class_name == 'document_region' and keep.sum() >= 4:
+                            elif t.detection.class_name == 'document_region' and keep.sum() >= 6:
                                 # Xử lý xoay/nghiêng: các điểm xoay quanh tâm làm lệch chuyển động tịnh tiến thuần.
                                 # Dùng estimateAffinePartial2D để bám theo góc nghiêng và cập nhật khung bao.
                                 M, inliers = cv2.estimateAffinePartial2D(src_pts, dst_pts)
-                                if M is not None and inliers is not None and inliers.sum() >= 3:
+                                if M is not None and inliers is not None and inliers.sum() >= 4:
                                     corners = np.array([[[a * sx, b * sy], [c * sx, b * sy], [c * sx, d * sy], [a * sx, d * sy]]], dtype=np.float32)
                                     trans_corners = cv2.transform(corners, M)[0] / [sx, sy]
                                     rx1, ry1 = np.min(trans_corners, axis=0)
@@ -268,8 +265,8 @@ class RegionTracker:
                     # Mô hình thực tế: suy luận theo vận tốc để chuyển động nhanh không làm rơi mất vùng che
                     a, b, c, d = t.filtered_box or t.detection.bbox
                     age = max(0.0, now - t.seen)
-                    dx = float(np.clip(t.velocity[0] * age, -0.6 * (c - a), 0.6 * (c - a)))
-                    dy = float(np.clip(t.velocity[1] * age, -0.6 * (d - b), 0.6 * (d - b)))
+                    dx = float(np.clip(t.velocity[0] * age, -0.5 * (c - a), 0.5 * (c - a)))
+                    dy = float(np.clip(t.velocity[1] * age, -0.5 * (d - b), 0.5 * (d - b)))
                     render_box = (a + dx, b + dy, c + dx, d + dy)
             box = normalize_box(render_box, w, h)
             if box is None:
@@ -280,7 +277,7 @@ class RegionTracker:
             if t.state in ('detected', 'tracked'):
                 if t.state == 'detected' or t.points is None or len(t.points) < 8:
                     points = (
-                        cv2.goodFeaturesToTrack(gray[y1:y2, x1:x2], maxCorners=32, qualityLevel=0.005, minDistance=4)
+                        cv2.goodFeaturesToTrack(gray[y1:y2, x1:x2], maxCorners=24, qualityLevel=0.01, minDistance=5)
                         if (t.detection.source in ('face', 'plate', 'document') or t.detection.class_name == 'document_region')
                         else None
                     )
